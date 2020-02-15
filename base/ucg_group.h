@@ -30,8 +30,11 @@ __KHASH_TYPE(ucg_group_ep, ucg_group_member_index_t, ucp_ep_h)
 typedef struct ucg_groups {
     ucs_list_link_t       groups_head;
     ucg_group_id_t        next_id;
+
+#ifdef UCT_COLLECTIVES
     uint32_t              num_local_peers;
     uint32_t              my_local_peer_idx;
+#endif
 
     unsigned              iface_cnt;
     uct_iface_h           ifaces[UCG_GROUP_MAX_IFACES];

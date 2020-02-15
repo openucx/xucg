@@ -3,6 +3,8 @@
 # See file LICENSE for terms.
 #
 
+if HAVE_UCG
+
 SUBDIRS = base builtin
 
 lib_LTLIBRARIES    = libucg.la
@@ -24,3 +26,5 @@ nobase_dist_libucg_la_HEADERS = \
 	api/ucg_plan_component.h \
 	api/ucg_mpi.h \
 	api/ucg.h
+
+endif # HAVE_UCG

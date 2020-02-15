@@ -244,7 +244,7 @@ ucs_status_t ucg_builtin_step_create(ucg_builtin_plan_phase_t *phase,
     } else {
         *current_data_buffer = step->recv_buffer;
     }
-    ucs_assert(base_am_id < UCP_AM_ID_MAX);
+    ucs_assert(base_am_id >= UCP_AM_ID_LAST);
 
     /* Decide how the messages are sent (regardless of my role) */
     enum ucg_builtin_op_step_flags send_flag;
@@ -360,7 +360,12 @@ ucs_status_t ucg_builtin_step_create(ucg_builtin_plan_phase_t *phase,
 
     /* Select the right completion callback */
     return ucg_builtin_step_select_callbacks(phase, &step->recv_cb, step->flags,
-            phase->ep_attr->cap.align_incast, params->send.count > 0);
+#ifdef HAVE_UCP_EXTENSIONS
+            phase->ep_attr->cap.align_incast,
+#else
+            0,
+#endif
+            params->send.count > 0);
 }
 
 ucs_status_t ucg_builtin_op_create(ucg_plan_t *plan,

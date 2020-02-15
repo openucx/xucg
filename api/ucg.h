@@ -50,10 +50,30 @@ BEGIN_C_DECLS
  * Since UCG works on top of UCP, most of the functionality overlaps. For API
  * completeness, UCG presents a full-featured API with the "ucg_" prefix.
  */
+#define ucg_worker_h                ucp_worker_h
+#ifndef UCP_EXTENSIONS
+typedef struct ucg_context         *ucg_context_h;
+ucs_status_t ucg_worker_create(ucg_context_h context,
+                               const ucp_worker_params_t *params,
+                               ucg_worker_h *worker_p);
+void ucg_cleanup(ucg_context_h context);
+
+#define UCS_ALLOC_CHECK(size, name) ({ \
+    void* ptr = ucs_malloc(size, name); \
+    if (ptr == 0) return UCS_ERR_NO_MEMORY; \
+    ptr; \
+})
+
+#define uct_pack_locked_callback_t  uct_pack_callback_t
+#define ucs_spinlock_pure_t         ucs_spinlock_t
+#define ep_am_bcopy_locked          ep_am_bcopy
+#else
 #define ucg_context_h               ucp_context_h
+#define ucg_worker_create           ucp_worker_create
+#define ucg_cleanup                 ucp_cleanup
+#endif
 #define ucg_config_t                ucp_config_t
 #define ucg_address_t               ucp_address_t
-#define ucg_worker_h                ucp_worker_h
 #define ucg_params_t                ucp_params_t
 #define ucg_context_attr_t          ucp_context_attr_t
 #define ucg_worker_attr_t           ucp_worker_attr_t
@@ -64,10 +84,8 @@ BEGIN_C_DECLS
 #define ucg_config_print            ucp_config_print
 #define ucg_get_version             ucp_get_version
 #define ucg_get_version_string      ucp_get_version_string
-#define ucg_cleanup                 ucp_cleanup
 #define ucg_context_query           ucp_context_query
 #define ucg_context_print_info      ucp_context_print_info
-#define ucg_worker_create           ucp_worker_create
 #define ucg_worker_destroy          ucp_worker_destroy
 #define ucg_worker_query            ucp_worker_query
 #define ucg_worker_print_info       ucp_worker_print_info

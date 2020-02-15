@@ -135,9 +135,8 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_am_handler,
     /* Find the Group context, based on the ID received in the header */
     ucg_group_id_t group_id = header->group_id;
     ucs_assert(group_id < bctx->group_by_id.size);
-    ucg_builtin_group_ctx_t *gctx = (ucg_builtin_group_ctx_t*)
-            UCS_PTR_ARRAY_GET_ELEM(&bctx->group_by_id, group_id);
-    ucs_assert(!UCS_PTR_ARRAY_IS_INDEX_FREE(&bctx->group_by_id, group_id));
+    ucg_builtin_group_ctx_t *gctx;
+    ucs_ptr_array_lookup(&bctx->group_by_id, group_id, gctx);
     ucs_assert(gctx != NULL);
 
     /* Find the slot to be used, based on the ID received in the header */
@@ -179,11 +178,15 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_am_handler,
     ucs_status_t ret = ucp_recv_desc_init(worker, data, length,
             0, am_flags, 0, 0, 0, &rdesc);
     if (ucs_likely(ret != UCS_ERR_NO_MEMORY)) {
-        (void) ucs_ptr_array_insert(&slot->messages, rdesc);
+        uint32_t placeholder;
+        (void) ucs_ptr_array_insert(&slot->messages, rdesc, &placeholder);
     }
     return ret;
 }
 
+#ifndef HAVE_UCP_EXTENSIONS
+static unsigned ucg_am_id;
+#else
 static void ucg_builtin_msg_dump(ucp_worker_h worker, uct_am_trace_type_t type,
                                  uint8_t id, const void *data, size_t length,
                                  char *buffer, size_t max)
@@ -193,16 +196,21 @@ static void ucg_builtin_msg_dump(ucp_worker_h worker, uct_am_trace_type_t type,
              (unsigned)header->msg.coll_id, (unsigned)header->msg.step_idx,
              (uint64_t)header->remote_offset, length - sizeof(*header));
 }
+#endif
 
 static ucs_status_t ucg_builtin_query(unsigned ucg_api_version,
         unsigned available_am_id, ucg_plan_desc_t **desc_p, unsigned *num_descs_p)
 {
+#ifdef HAVE_UCP_EXTENSIONS
     /* Set the Active Message handler (before creating the UCT interfaces) */
     ucp_am_handler_t* am_handler     = ucp_am_handlers + available_am_id;
     am_handler->features             = UCP_FEATURE_GROUPS;
     am_handler->cb                   = ucg_builtin_am_handler;
     am_handler->tracer               = ucg_builtin_msg_dump;
     am_handler->flags                = 0;
+#else
+    ucg_am_id = available_am_id;
+#endif
 
     /* Return a simple description of the "Builtin" module */
     ucs_status_t status              = ucg_plan_single(&ucg_builtin_component,
@@ -253,7 +261,7 @@ static ucs_status_t ucg_builtin_create(ucg_plan_component_t *plan_component,
     unsigned i;
     for (i = 0; i < UCG_BUILTIN_MAX_CONCURRENT_OPS; i++) {
         ucg_builtin_comp_slot_t *slot = &gctx->slots[i];
-        ucs_ptr_array_init(&slot->messages, "builtin messages");
+        ucs_ptr_array_init(&slot->messages, 0, "builtin messages");
         slot->req.latest.step_idx = 0;
         slot->req.latest.coll_id = 0;
         slot->cb = NULL;
@@ -262,11 +270,21 @@ static ucs_status_t ucg_builtin_create(ucg_plan_component_t *plan_component,
     /* Create or expand the per-worker context - for the AM-handler's use */
     if (ucs_unlikely(group_id == 0)) {
         /* First group ever created - initialize the global context */
-        ucs_ptr_array_init(&bctx->group_by_id, "builtin_group_table");
+        ucs_ptr_array_init(&bctx->group_by_id, 0, "builtin_group_table");
         ucg_builtin_mpi_reduce_cb = group_params->mpi_reduce_f;
     }
 
-    ucs_ptr_array_set(&bctx->group_by_id, group_id, gctx);
+#ifndef HAVE_UCP_EXTENSIONS
+    for (i = 0; i < worker->num_ifaces; i++) {
+        ucs_status_t status = uct_iface_set_am_handler(worker->ifaces[i]->iface,
+                ucg_am_id, ucg_builtin_am_handler, worker, 0);
+        if (status != UCS_OK) {
+            return status;
+        }
+    }
+#endif
+
+    (void) ucs_ptr_array_replace(&bctx->group_by_id, group_id, gctx);
     return UCS_OK;
 }
 
@@ -291,10 +309,13 @@ static void ucg_builtin_destroy(ucg_group_h group)
                      ((ucg_builtin_header_t*)(rdesc + 1))->msg.coll_id,
                      ((ucg_builtin_header_t*)(rdesc + 1))->msg.step_idx,
                      ((ucg_builtin_header_t*)(rdesc + 1))->group_id);
+#ifdef HAVE_UCP_EXTENSIONS
             if (!(rdesc->flags & UCP_RECV_DESC_FLAG_UCT_DESC_SHARED)) {
                 ucp_recv_desc_release(rdesc, NULL);
             } /* No UCT interface information, we can't release if it's shared */
-            ucs_ptr_array_remove(&slot->messages, j);
+#endif
+            ucp_recv_desc_release(rdesc);
+            ucs_ptr_array_remove(&slot->messages, j, 0);
         }
         ucs_ptr_array_cleanup(&slot->messages);
     }
@@ -316,7 +337,7 @@ static void ucg_builtin_destroy(ucg_group_h group)
 
     /* Remove the group from the global storage array */
     ucg_builtin_ctx_t *bctx = gctx->bctx;
-    ucs_ptr_array_remove(&bctx->group_by_id, gctx->group_id);
+    ucs_ptr_array_remove(&bctx->group_by_id, gctx->group_id, 0);
     if (ucs_unlikely(gctx->group_id == 0)) {
         ucs_ptr_array_cleanup(&bctx->group_by_id);
     }

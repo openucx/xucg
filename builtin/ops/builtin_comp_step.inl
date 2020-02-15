@@ -75,14 +75,18 @@ ucg_builtin_step_check_pending(ucg_builtin_comp_slot_t *slot)
 
         if (ucs_likely(header->msg.local_id == local_id)) {
             /* Remove the packet (next call may lead here recursively) */
-            ucs_ptr_array_remove(&slot->messages, msg_index);
+            ucs_ptr_array_remove(&slot->messages, msg_index, 0);
 
             /* Handle this "waiting" packet, possibly completing the step */
             int is_step_done = slot->cb(&slot->req, header->remote_offset,
                     header + 1, rdesc->length);
 
             /* Dispose of the packet, according to its allocation */
-            ucp_recv_desc_release(rdesc, slot->req.step->uct_iface);
+            ucp_recv_desc_release(rdesc
+#ifdef HAVE_UCP_EXTENSIONS
+                    , slot->req.step->uct_iface
+#endif
+                    );
 
             /* If the step has indeed completed - check the entire op */
             if (is_step_done) {

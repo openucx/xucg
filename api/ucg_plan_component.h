@@ -104,7 +104,9 @@ typedef struct ucg_plan {
     ucg_plan_component_t    *planner;
     ucg_group_id_t           group_id;
     ucg_group_member_index_t group_size;
+#ifdef UCT_COLLECTIVES
     ucg_group_member_index_t group_host_size;
+#endif
     ucg_group_member_index_t my_index;
     ucg_group_h              group;
     char                     priv[0];

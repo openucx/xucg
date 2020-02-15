@@ -64,6 +64,287 @@ __KHASH_IMPL(ucg_group_ep, static UCS_F_MAYBE_UNUSED inline,
              ucg_group_member_index_t, ucp_ep_h, 1, kh_int64_hash_func,
              kh_int64_hash_equal);
 
+#ifndef HAVE_UCP_EXTENSIONS
+/**
+ * This code is intended to reside in UCP, but is "hosted" in UCG for now...
+ */
+
+typedef ucs_status_t (*ucp_ext_init_f)(ucp_worker_h worker,
+                                       unsigned *next_am_id,
+                                       void *ext_ctx);
+
+typedef void (*ucp_ext_cleanup_f)(void *ext_ctx);
+
+typedef struct ucp_context_extenstion {
+    ucs_list_link_t list;
+    size_t worker_offset;
+    ucp_ext_init_f init;
+    ucp_ext_cleanup_f cleanup;
+} ucp_context_extension_t;
+
+struct ucg_context {
+#ifndef HAVE_UCP_EXTENSIONS
+    ucp_context_t                *super;          /* Extending the UCP context */
+#else
+    ucp_context_t                 super;          /* Extending the UCP context */
+#endif
+    size_t                        worker_size;    /* Worker allocation size */
+    ucs_list_link_t               extensions;     /* List of registered extensions */
+    unsigned                      last_am_id;     /* Last used AM ID */
+};
+
+#ifndef HAVE_UCP_EXTENSIONS
+/*
+ * Per the UCX community's request to make minimal changes to accomodate UCG,
+ * this code was added - duplicating UCP worker creation in a way UCG can use.
+ */
+
+#include <ucp/core/ucp_worker.c> /* Needed to provide worker creation logic */
+
+ucs_status_t ucp_worker_create_by_size(ucp_context_h context,
+                                       const ucp_worker_params_t *params,
+                                       size_t worker_size,
+                                       ucp_worker_h *worker_p)
+{
+    ucs_thread_mode_t uct_thread_mode;
+    unsigned config_count;
+    unsigned name_length;
+    ucp_worker_h worker;
+    ucs_status_t status;
+
+    config_count = ucs_min((context->num_tls + 1) * (context->num_tls + 1) * context->num_tls,
+                           UINT8_MAX);
+
+    worker = ucs_calloc(1, worker_size, "ucp worker");
+    if (worker == NULL) {
+        return UCS_ERR_NO_MEMORY;
+    }
+
+    uct_thread_mode = UCS_THREAD_MODE_SINGLE;
+    worker->flags   = 0;
+
+    if (params->field_mask & UCP_WORKER_PARAM_FIELD_THREAD_MODE) {
+#if ENABLE_MT
+        if (params->thread_mode != UCS_THREAD_MODE_SINGLE) {
+            /* UCT is serialized by UCP lock or by UCP user */
+            uct_thread_mode = UCS_THREAD_MODE_SERIALIZED;
+        }
+
+        if (params->thread_mode == UCS_THREAD_MODE_MULTI) {
+            worker->flags |= UCP_WORKER_FLAG_MT;
+        }
+#else
+        if (params->thread_mode != UCS_THREAD_MODE_SINGLE) {
+            ucs_debug("forced single thread mode on worker create");
+        }
+#endif
+    }
+
+    worker->context           = context;
+    worker->uuid              = ucs_generate_uuid((uintptr_t)worker);
+    worker->flush_ops_count   = 0;
+    worker->inprogress        = 0;
+    worker->ep_config_max     = config_count;
+    worker->ep_config_count   = 0;
+    worker->num_active_ifaces = 0;
+    worker->num_ifaces        = 0;
+    worker->am_message_id     = ucs_generate_uuid(0);
+    ucs_list_head_init(&worker->arm_ifaces);
+    ucs_list_head_init(&worker->stream_ready_eps);
+    ucs_list_head_init(&worker->all_eps);
+    ucp_ep_match_init(&worker->ep_match_ctx);
+
+    UCS_STATIC_ASSERT(sizeof(ucp_ep_ext_gen_t) <= sizeof(ucp_ep_t));
+    if (context->config.features & (UCP_FEATURE_STREAM | UCP_FEATURE_AM)) {
+        UCS_STATIC_ASSERT(sizeof(ucp_ep_ext_proto_t) <= sizeof(ucp_ep_t));
+        ucs_strided_alloc_init(&worker->ep_alloc, sizeof(ucp_ep_t), 3);
+    } else {
+        ucs_strided_alloc_init(&worker->ep_alloc, sizeof(ucp_ep_t), 2);
+    }
+
+    if (params->field_mask & UCP_WORKER_PARAM_FIELD_USER_DATA) {
+        worker->user_data = params->user_data;
+    } else {
+        worker->user_data = NULL;
+    }
+
+    if (context->config.features & UCP_FEATURE_AM){
+        worker->am_cbs            = NULL;
+        worker->am_cb_array_len   = 0;
+    }
+    name_length = ucs_min(UCP_WORKER_NAME_MAX,
+                          context->config.ext.max_worker_name + 1);
+    ucs_snprintf_zero(worker->name, name_length, "%s:%d", ucs_get_host_name(),
+                      getpid());
+
+    /* Create statistics */
+    status = UCS_STATS_NODE_ALLOC(&worker->stats, &ucp_worker_stats_class,
+                                  ucs_stats_get_root(), "-%p", worker);
+    if (status != UCS_OK) {
+        goto err_free;
+    }
+
+    status = UCS_STATS_NODE_ALLOC(&worker->tm_offload_stats,
+                                  &ucp_worker_tm_offload_stats_class,
+                                  worker->stats);
+    if (status != UCS_OK) {
+        goto err_free_stats;
+    }
+
+    status = ucs_async_context_init(&worker->async,
+                                    context->config.ext.use_mt_mutex ?
+                                    UCS_ASYNC_MODE_THREAD_MUTEX :
+                                    UCS_ASYNC_THREAD_LOCK_TYPE);
+    if (status != UCS_OK) {
+        goto err_free_tm_offload_stats;
+    }
+
+    /* Create the underlying UCT worker */
+    status = uct_worker_create(&worker->async, uct_thread_mode, &worker->uct);
+    if (status != UCS_OK) {
+        goto err_destroy_async;
+    }
+
+    /* Create memory pool for requests */
+    status = ucs_mpool_init(&worker->req_mp, 0,
+                            sizeof(ucp_request_t) + context->config.request.size,
+                            0, UCS_SYS_CACHE_LINE_SIZE, 128, UINT_MAX,
+                            &ucp_request_mpool_ops, "ucp_requests");
+    if (status != UCS_OK) {
+        goto err_destroy_uct_worker;
+    }
+
+    /* create memory pool for small rkeys */
+    status = ucs_mpool_init(&worker->rkey_mp, 0,
+                            sizeof(ucp_rkey_t) +
+                            sizeof(ucp_tl_rkey_t) * UCP_RKEY_MPOOL_MAX_MD,
+                            0, UCS_SYS_CACHE_LINE_SIZE, 128, UINT_MAX,
+                            &ucp_rkey_mpool_ops, "ucp_rkeys");
+    if (status != UCS_OK) {
+        goto err_req_mp_cleanup;
+    }
+
+    /* Create UCS event set which combines events from all transports */
+    status = ucp_worker_wakeup_init(worker, params);
+    if (status != UCS_OK) {
+        goto err_rkey_mp_cleanup;
+    }
+
+    if (params->field_mask & UCP_WORKER_PARAM_FIELD_CPU_MASK) {
+        worker->cpu_mask = params->cpu_mask;
+    } else {
+        UCS_CPU_ZERO(&worker->cpu_mask);
+    }
+
+    /* Initialize tag matching */
+    status = ucp_tag_match_init(&worker->tm);
+    if (status != UCS_OK) {
+        goto err_wakeup_cleanup;
+    }
+
+    /* Open all resources as interfaces on this worker */
+    status = ucp_worker_add_resource_ifaces(worker);
+    if (status != UCS_OK) {
+        goto err_close_ifaces;
+    }
+
+    /* Open all resources as connection managers on this worker */
+    status = ucp_worker_add_resource_cms(worker);
+    if (status != UCS_OK) {
+        goto err_close_cms;
+    }
+
+    /* create mem type endponts */
+    status = ucp_worker_create_mem_type_endpoints(worker);
+    if (status != UCS_OK) {
+        goto err_close_cms;
+    }
+
+    /* Init AM and registered memory pools */
+    status = ucp_worker_init_mpools(worker);
+    if (status != UCS_OK) {
+        goto err_close_cms;
+    }
+
+    /* Select atomic resources */
+    ucp_worker_init_atomic_tls(worker);
+
+    /* At this point all UCT memory domains and interfaces are already created
+     * so warn about unused environment variables.
+     */
+    ucs_config_parser_warn_unused_env_vars_once();
+
+    *worker_p = worker;
+    return UCS_OK;
+
+err_close_cms:
+    ucp_worker_close_cms(worker);
+err_close_ifaces:
+    ucp_worker_close_ifaces(worker);
+    ucp_tag_match_cleanup(&worker->tm);
+err_wakeup_cleanup:
+    ucp_worker_wakeup_cleanup(worker);
+err_rkey_mp_cleanup:
+    ucs_mpool_cleanup(&worker->rkey_mp, 1);
+err_req_mp_cleanup:
+    ucs_mpool_cleanup(&worker->req_mp, 1);
+err_destroy_uct_worker:
+    uct_worker_destroy(worker->uct);
+err_destroy_async:
+    ucs_async_context_cleanup(&worker->async);
+err_free_tm_offload_stats:
+    UCS_STATS_NODE_FREE(worker->tm_offload_stats);
+err_free_stats:
+    UCS_STATS_NODE_FREE(worker->stats);
+err_free:
+    ucs_strided_alloc_cleanup(&worker->ep_alloc);
+    ucs_free(worker);
+    return status;
+}
+
+ucs_status_t ucg_worker_create(ucg_context_h context,
+                               const ucp_worker_params_t *params,
+                               ucg_worker_h *worker_p)
+{
+    return ucp_worker_create_by_size(context->super, params,
+            context->worker_size, worker_p);
+}
+
+void ucg_cleanup(ucg_context_h context) {
+    ucp_cleanup(context->super);
+    ucs_free(context);
+}
+#endif
+
+ucs_status_t ucp_extend(ucg_context_h context, size_t extension_ctx_length,
+                        ucp_ext_init_f init, ucp_ext_cleanup_f cleanup,
+                        size_t *extension_ctx_offset_in_worker)
+{
+    ucp_context_extension_t *ext = ucs_malloc(sizeof(*ext), "context extension");
+    if (!ext) {
+        return UCS_ERR_NO_MEMORY;
+    }
+
+    ext->init                       = init;
+    ext->cleanup                    = cleanup;
+    ext->worker_offset              = context->worker_size;
+    context->worker_size           += extension_ctx_length;
+    *extension_ctx_offset_in_worker = ext->worker_offset;
+
+    ucs_list_add_tail(&context->extensions, &ext->list);
+    return UCS_OK;
+}
+
+void ucp_extension_cleanup(ucg_context_h context)
+{
+    ucp_context_extension_t *ext, *iter;
+    ucs_list_for_each_safe(ext, iter, &context->extensions, list) {
+        ucs_list_del(&ext->list);
+        ucs_free(ext);
+    } /* Why not simply use while(!is_empty()) ? CLANG emits a false positive */
+}
+#endif
+
 unsigned ucg_worker_progress(ucg_worker_h worker)
 {
     unsigned idx, ret = 0;
@@ -297,7 +578,9 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_collective_create,
     plan->type              = params->type;
     plan->group_id          = group->group_id;
     plan->group_size        = group->params.member_count;
+#ifdef UCT_COLLECTIVES
     plan->group_host_size   = group->worker->context->config.num_local_peers;
+#endif
     group->cache[coll_mask] = plan;
     ucs_list_head_init(&plan->op_head);
     UCS_STATS_UPDATE_COUNTER(group->stats, UCG_GROUP_STAT_PLANS_CREATED, 1);
@@ -448,8 +731,10 @@ static ucs_status_t ucg_worker_groups_init(ucp_worker_h worker,
     gctx->next_id             = 0;
     gctx->iface_cnt           = 0;
     gctx->total_planner_sizes = group_ctx_offset;
+#ifdef UCT_COLLECTIVES
     gctx->num_local_peers     = worker->context->config.num_local_peers;
     gctx->my_local_peer_idx   = worker->context->config.my_local_peer_idx;
+#endif
     ucs_list_head_init(&gctx->groups_head);
     return UCS_OK;
 }
@@ -468,6 +753,34 @@ static void ucg_worker_groups_cleanup(void *groups_ctx)
     ucg_plan_release_list(gctx->planners, gctx->num_planners);
 }
 
+static ucs_status_t ucg_extend_ucp(const ucg_params_t *params,
+                                   const ucg_config_t *config,
+                                   ucg_context_h *context_p)
+{
+#ifndef HAVE_UCP_EXTENSIONS
+        /* Since UCP doesn't support extensions (yet?) - we need to allocate... */
+        ucg_context_h ucg_context = ucs_calloc(1, sizeof(*ucg_context), "ucg context");
+        if (!ucg_context) {
+            return UCS_ERR_NO_MEMORY;
+        }
+
+        ucg_context->last_am_id = 0;
+        ucg_context->super = (ucp_context_h)context_p;
+        ucg_context->worker_size = sizeof(ucp_worker_t) + sizeof(ucp_ep_config_t) *
+                ucs_min((ucg_context->super->num_tls + 1) *
+                        (ucg_context->super->num_tls + 1) *
+                        (ucg_context->super->num_tls),
+                        UINT8_MAX);
+        *context_p = ucg_context;
+#endif
+
+        size_t ctx_size = sizeof(ucg_groups_t) +
+                ucs_list_length(&ucg_plan_components_list) * sizeof(void*);
+        ucs_list_head_init(&(*context_p)->extensions);
+        return ucp_extend(*context_p, ctx_size, ucg_worker_groups_init,
+                ucg_worker_groups_cleanup, &ucg_ctx_worker_offset);
+}
+
 ucs_status_t ucg_init_version(unsigned api_major_version,
                               unsigned api_minor_version,
                               const ucg_params_t *params,
@@ -475,12 +788,9 @@ ucs_status_t ucg_init_version(unsigned api_major_version,
                               ucg_context_h *context_p)
 {
     ucs_status_t status = ucp_init_version(api_major_version, api_minor_version,
-                                           params, config, context_p);
+                                           params, config, (ucp_context_h*)context_p);
     if (status == UCS_OK) {
-        size_t ctx_size = sizeof(ucg_groups_t) +
-                ucs_list_length(&ucg_plan_components_list) * sizeof(void*);
-        status = ucp_extend(*context_p, ctx_size, ucg_worker_groups_init,
-                ucg_worker_groups_cleanup, &ucg_ctx_worker_offset);
+        status = ucg_extend_ucp(params, config, context_p);
     }
     return status;
 }
@@ -489,12 +799,9 @@ ucs_status_t ucg_init(const ucg_params_t *params,
                       const ucg_config_t *config,
                       ucg_context_h *context_p)
 {
-    ucs_status_t status = ucp_init(params, config, context_p);
+    ucs_status_t status = ucp_init(params, config, (ucp_context_h*)context_p);
     if (status == UCS_OK) {
-        size_t ctx_size = sizeof(ucg_groups_t) +
-                ucs_list_length(&ucg_plan_components_list) * sizeof(void*);
-        status = ucp_extend(*context_p, ctx_size, ucg_worker_groups_init,
-                ucg_worker_groups_cleanup, &ucg_ctx_worker_offset);
+        status = ucg_extend_ucp(params, config, context_p);
     }
     return status;
 }
@@ -550,6 +857,7 @@ ucs_status_t ucg_plan_connect(ucg_group_h group,
     /* Connect for point-to-point communication */
     ucp_lane_index_t lane;
 am_retry:
+#ifdef UCT_COLLECTIVES
     if (flags & UCG_PLAN_CONNECT_FLAG_WANT_INCAST) {
         lane = ucp_ep_get_incast_lane(ucp_ep);
         if (ucs_unlikely(lane == UCP_NULL_LANE)) {
@@ -566,7 +874,9 @@ am_retry:
             return UCS_ERR_UNREACHABLE;
         }
         *ep_p = ucp_ep_get_bcast_uct_ep(ucp_ep);
-    } else {
+    } else
+#endif /* UCT_COLLECTIVES */
+    {
         lane  = ucp_ep_get_am_lane(ucp_ep);
         *ep_p = ucp_ep_get_am_uct_ep(ucp_ep);
     }

@@ -37,9 +37,16 @@ UCG_BUILTIN_BCOPY_PACK_CB(step->recv_buffer, step->iter_offset, step->fragment_l
 UCG_BUILTIN_PACKER_DECLARE(_, _partial, _rbuf)
 UCG_BUILTIN_BCOPY_PACK_CB(step->recv_buffer, step->iter_offset, step->buffer_length - step->iter_offset)
 
+#ifndef HAVE_UCP_EXTENSIONS
+#define LOCK_HACK ucs_spinlock_t *lock = NULL;
+#else
+#define LOCK_HACK
+#endif
+
 #define UCG_BUILTIN_COLL_PACK_CB(source, offset, length, part) { \
     /* First writer to this buffer - overwrite the existing data */ \
     ucg_builtin_request_t *req = (ucg_builtin_request_t*)arg; \
+    LOCK_HACK /* until we get HAVE_UCP_EXTENSIONS... */ \
     if (ucs_unlikely(!lock)) { \
         arg = (ucg_builtin_op_step_t*)(req->step); \
         UCG_BUILTIN_BCOPY_PACK_CB(source, offset, length) \
