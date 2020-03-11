@@ -75,7 +75,7 @@ ucg_builtin_step_check_pending(ucg_builtin_comp_slot_t *slot)
 
         if (ucs_likely(header->msg.local_id == local_id)) {
             /* Remove the packet (next call may lead here recursively) */
-            ucs_ptr_array_remove(&slot->messages, msg_index, 0);
+            ucs_ptr_array_remove(&slot->messages, msg_index);
 
             /* Handle this "waiting" packet, possibly completing the step */
             int is_step_done = slot->cb(&slot->req, header->remote_offset,

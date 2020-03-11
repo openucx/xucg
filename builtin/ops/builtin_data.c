@@ -88,7 +88,7 @@ ucg_builtin_step_am_short_max(ucg_builtin_request_t *req,
 
 void static UCS_F_ALWAYS_INLINE
 ucg_builtin_step_select_packers(uct_pack_locked_callback_t *packer_full_cb,
-                                uct_pack_locked_callback_t *packer_partial_cb,
+                                uct_pack_locked_callback_t *packer_part_cb,
                                 uct_pack_locked_callback_t *packer_single_cb,
                                 int is_locked, int use_rbuf)
 {
@@ -100,12 +100,12 @@ ucg_builtin_step_select_packers(uct_pack_locked_callback_t *packer_full_cb,
                 UCG_BUILTIN_PACKER_NAME(_, _full, _sbuf));
     }
 
-    if (packer_partial_cb) {
-        *packer_partial_cb = is_locked ? (use_rbuf ?
-                UCG_BUILTIN_PACKER_NAME(_locked, _partial, _rbuf) :
-                UCG_BUILTIN_PACKER_NAME(_locked, _partial, _sbuf)) : (use_rbuf ?
-                UCG_BUILTIN_PACKER_NAME(_, _partial, _rbuf) :
-                UCG_BUILTIN_PACKER_NAME(_, _partial, _sbuf));
+    if (packer_part_cb) {
+        *packer_part_cb = is_locked ? (use_rbuf ?
+                UCG_BUILTIN_PACKER_NAME(_locked, _part, _rbuf) :
+                UCG_BUILTIN_PACKER_NAME(_locked, _part, _sbuf)) : (use_rbuf ?
+                UCG_BUILTIN_PACKER_NAME(_, _part, _rbuf) :
+                UCG_BUILTIN_PACKER_NAME(_, _part, _sbuf));
     }
 
     if (packer_single_cb) {
@@ -146,8 +146,8 @@ ucg_builtin_step_am_bcopy_max(ucg_builtin_request_t *req,
 
     /* Select bcopy packer callback */
     uct_pack_locked_callback_t packer_full_cb;
-    uct_pack_locked_callback_t packer_partial_cb;
-    ucg_builtin_step_select_packers(&packer_full_cb, &packer_partial_cb,
+    uct_pack_locked_callback_t packer_part_cb;
+    ucg_builtin_step_select_packers(&packer_full_cb, &packer_part_cb,
             NULL, is_locked, use_rbuf);
 
     UCG_BUILTIN_ASSERT_SEND(step, BCOPY);
@@ -176,7 +176,7 @@ ucg_builtin_step_am_bcopy_max(ucg_builtin_request_t *req,
     }
 
     /* Send last fragment of the message */
-    len = send_func(ep, am_id, packer_partial_cb, step, 0);
+    len = send_func(ep, am_id, packer_part_cb, step, 0);
     if (ucs_unlikely(len < 0)) {
         return (ucs_status_t)len;
     }

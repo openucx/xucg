@@ -203,7 +203,7 @@ typedef ssize_t (*packed_send_t)(uct_ep_h, uint8_t, uct_pack_locked_callback_t, 
 #ifdef HAVE_UCP_EXTENSIONS
 #define UCG_BUILTIN_PACKER_DECLARE(_modifier, _mode, _buffer) \
     size_t UCG_BUILTIN_PACKER_NAME(_modifier, _mode, _buffer) \
-        (void *dest, ucs_spinlock_pure_t *lock, void *arg)
+        (void *dest, ucs_spinlock_t *lock, void *arg)
 #else
 #define UCG_BUILTIN_PACKER_DECLARE(_modifier, _mode, _buffer) \
     size_t UCG_BUILTIN_PACKER_NAME(_modifier, _mode, _buffer) \
@@ -217,7 +217,7 @@ typedef ssize_t (*packed_send_t)(uct_ep_h, uint8_t, uct_pack_locked_callback_t, 
 #define UCG_BUILTIN_PACKER_DECLARE_BY_MODE(_modifier) \
         UCG_BUILTIN_PACKER_DECLARE_BY_BUFFER(_modifier, _single) \
         UCG_BUILTIN_PACKER_DECLARE_BY_BUFFER(_modifier, _full) \
-        UCG_BUILTIN_PACKER_DECLARE_BY_BUFFER(_modifier, _partial)
+        UCG_BUILTIN_PACKER_DECLARE_BY_BUFFER(_modifier, _part)
 
 UCG_BUILTIN_PACKER_DECLARE_BY_MODE(_)
 UCG_BUILTIN_PACKER_DECLARE_BY_MODE(_locked)

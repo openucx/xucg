@@ -50,8 +50,9 @@ BEGIN_C_DECLS
  * Since UCG works on top of UCP, most of the functionality overlaps. For API
  * completeness, UCG presents a full-featured API with the "ucg_" prefix.
  */
+#define HAVE_UCP_EXTENSIONS
 #define ucg_worker_h                ucp_worker_h
-#ifndef UCP_EXTENSIONS
+#ifndef HAVE_UCP_EXTENSIONS
 typedef struct ucg_context         *ucg_context_h;
 ucs_status_t ucg_worker_create(ucg_context_h context,
                                const ucp_worker_params_t *params,
@@ -65,7 +66,6 @@ void ucg_cleanup(ucg_context_h context);
 })
 
 #define uct_pack_locked_callback_t  uct_pack_callback_t
-#define ucs_spinlock_pure_t         ucs_spinlock_t
 #define ep_am_bcopy_locked          ep_am_bcopy
 #else
 #define ucg_context_h               ucp_context_h

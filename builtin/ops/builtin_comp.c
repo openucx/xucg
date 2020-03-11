@@ -712,7 +712,7 @@ int ucg_builtin_atomic_reduce_full(ucg_builtin_request_t *req,
     return length; // TODO: make ucg_builtin_mpi_reduce return the actual size
 }
 
-int ucg_builtin_atomic_reduce_partial(ucg_builtin_request_t *req,
+int ucg_builtin_atomic_reduce_part(ucg_builtin_request_t *req,
         uint64_t offset, void *src, void *dst, size_t length, ucs_spinlock_t *lock)
 {
     ucg_collective_params_t *params = &req->op->super.params;

@@ -5,10 +5,10 @@
 
 #include "builtin_ops.h"
 
-int ucg_builtin_atomic_reduce_full(ucg_builtin_request_t *req,
-        uint64_t offset, void *src, void *dst, size_t length, ucs_spinlock_pure_t *lock);
-int ucg_builtin_atomic_reduce_partial(ucg_builtin_request_t *req,
-        uint64_t offset, void *src, void *dst, size_t length, ucs_spinlock_pure_t *lock);
+int ucg_builtin_atomic_reduce_full(ucg_builtin_request_t *req, uint64_t offset,
+        void *src, void *dst, size_t length, ucs_spinlock_t *lock);
+int ucg_builtin_atomic_reduce_part(ucg_builtin_request_t *req, uint64_t offset,
+        void *src, void *dst, size_t length, ucs_spinlock_t *lock);
 
 #define UCG_BUILTIN_BCOPY_PACK_CB(source, offset, length) { \
     ucg_builtin_op_step_t *step      = (ucg_builtin_op_step_t*)arg; \
@@ -25,7 +25,7 @@ UCG_BUILTIN_BCOPY_PACK_CB(step->send_buffer, 0,                 step->buffer_len
 UCG_BUILTIN_PACKER_DECLARE(_, _full, _sbuf)
 UCG_BUILTIN_BCOPY_PACK_CB(step->send_buffer, step->iter_offset, step->fragment_length)
 
-UCG_BUILTIN_PACKER_DECLARE(_, _partial, _sbuf)
+UCG_BUILTIN_PACKER_DECLARE(_, _part, _sbuf)
 UCG_BUILTIN_BCOPY_PACK_CB(step->send_buffer, step->iter_offset, step->buffer_length - step->iter_offset)
 
 UCG_BUILTIN_PACKER_DECLARE(_, _single, _rbuf)
@@ -34,7 +34,7 @@ UCG_BUILTIN_BCOPY_PACK_CB(step->recv_buffer, 0,                 step->buffer_len
 UCG_BUILTIN_PACKER_DECLARE(_, _full, _rbuf)
 UCG_BUILTIN_BCOPY_PACK_CB(step->recv_buffer, step->iter_offset, step->fragment_length)
 
-UCG_BUILTIN_PACKER_DECLARE(_, _partial, _rbuf)
+UCG_BUILTIN_PACKER_DECLARE(_, _part, _rbuf)
 UCG_BUILTIN_BCOPY_PACK_CB(step->recv_buffer, step->iter_offset, step->buffer_length - step->iter_offset)
 
 #ifndef HAVE_UCP_EXTENSIONS
@@ -60,19 +60,19 @@ UCG_BUILTIN_BCOPY_PACK_CB(step->recv_buffer, step->iter_offset, step->buffer_len
 }
 
 UCG_BUILTIN_PACKER_DECLARE(_locked, _single, _sbuf)
-UCG_BUILTIN_COLL_PACK_CB(step->send_buffer, 0,                 step->buffer_length, partial)
+UCG_BUILTIN_COLL_PACK_CB(step->send_buffer, 0,                 step->buffer_length, part)
 
 UCG_BUILTIN_PACKER_DECLARE(_locked, _full, _sbuf)
 UCG_BUILTIN_COLL_PACK_CB(step->send_buffer, step->iter_offset, step->fragment_length, full)
 
-UCG_BUILTIN_PACKER_DECLARE(_locked, _partial, _sbuf)
-UCG_BUILTIN_COLL_PACK_CB(step->send_buffer, step->iter_offset, step->buffer_length - step->iter_offset, partial)
+UCG_BUILTIN_PACKER_DECLARE(_locked, _part, _sbuf)
+UCG_BUILTIN_COLL_PACK_CB(step->send_buffer, step->iter_offset, step->buffer_length - step->iter_offset, part)
 
 UCG_BUILTIN_PACKER_DECLARE(_locked, _single, _rbuf)
-UCG_BUILTIN_COLL_PACK_CB(step->recv_buffer, 0,                 step->buffer_length, partial)
+UCG_BUILTIN_COLL_PACK_CB(step->recv_buffer, 0,                 step->buffer_length, part)
 
 UCG_BUILTIN_PACKER_DECLARE(_locked, _full, _rbuf)
 UCG_BUILTIN_COLL_PACK_CB(step->recv_buffer, step->iter_offset, step->fragment_length, full)
 
-UCG_BUILTIN_PACKER_DECLARE(_locked, _partial, _rbuf)
-UCG_BUILTIN_COLL_PACK_CB(step->recv_buffer, step->iter_offset, step->buffer_length - step->iter_offset, partial)
+UCG_BUILTIN_PACKER_DECLARE(_locked, _part, _rbuf)
+UCG_BUILTIN_COLL_PACK_CB(step->recv_buffer, step->iter_offset, step->buffer_length - step->iter_offset, part)

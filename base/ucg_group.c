@@ -75,7 +75,7 @@ typedef ucs_status_t (*ucp_ext_init_f)(ucp_worker_h worker,
 
 typedef void (*ucp_ext_cleanup_f)(void *ext_ctx);
 
-typedef struct ucp_context_extenstion {
+typedef struct ucp_context_extension {
     ucs_list_link_t list;
     size_t worker_offset;
     ucp_ext_init_f init;
