@@ -6,17 +6,19 @@
 #include "builtin_ops.h"
 
 int ucg_builtin_atomic_reduce_full(ucg_builtin_request_t *req, uint64_t offset,
-        void *src, void *dst, size_t length, ucs_spinlock_t *lock);
+        void *src, void *dst, size_t length);
 int ucg_builtin_atomic_reduce_part(ucg_builtin_request_t *req, uint64_t offset,
-        void *src, void *dst, size_t length, ucs_spinlock_t *lock);
+        void *src, void *dst, size_t length);
 
-#define UCG_BUILTIN_BCOPY_PACK_CB(source, offset, length) { \
-    ucg_builtin_op_step_t *step      = (ucg_builtin_op_step_t*)arg; \
-    ucg_builtin_header_t *header_ptr = (ucg_builtin_header_t*)dest; \
-    size_t buffer_length             = length; \
-    header_ptr->header               = step->am_header.header; \
-    memcpy(header_ptr + 1, source + offset, buffer_length); \
-    return sizeof(*header_ptr) + buffer_length; \
+#define UCG_BUILTIN_BCOPY_PACK_CB(_source, _offset, _length) { \
+    ucg_builtin_header_t *header = (ucg_builtin_header_t*)dest; \
+    ucg_builtin_request_t *req   = (ucg_builtin_request_t*)arg; \
+    ucg_builtin_op_step_t *step  = req->step; \
+    size_t buffer_length         = (_length); \
+    header->header               = step->am_header.header; \
+    ucs_assert(((uintptr_t)arg & UCT_PACK_CALLBACK_REDUCE) == 0); \
+    memcpy(header + 1, (_source) + (_offset), buffer_length); \
+    return sizeof(*header) + buffer_length; \
 }
 
 UCG_BUILTIN_PACKER_DECLARE(_, _single, _sbuf)
@@ -37,25 +39,20 @@ UCG_BUILTIN_BCOPY_PACK_CB(step->recv_buffer, step->iter_offset, step->fragment_l
 UCG_BUILTIN_PACKER_DECLARE(_, _part, _rbuf)
 UCG_BUILTIN_BCOPY_PACK_CB(step->recv_buffer, step->iter_offset, step->buffer_length - step->iter_offset)
 
-#ifndef HAVE_UCP_EXTENSIONS
-#define LOCK_HACK ucs_spinlock_t *lock = NULL;
-#else
-#define LOCK_HACK
-#endif
-
 #define UCG_BUILTIN_COLL_PACK_CB(source, offset, length, part) { \
     /* First writer to this buffer - overwrite the existing data */ \
-    ucg_builtin_request_t *req = (ucg_builtin_request_t*)arg; \
-    LOCK_HACK /* until we get HAVE_UCP_EXTENSIONS... */ \
-    if (ucs_unlikely(!lock)) { \
-        arg = (ucg_builtin_op_step_t*)(req->step); \
-        UCG_BUILTIN_BCOPY_PACK_CB(source, offset, length) \
-    } else { \
+    int is_reduce_needed = (uintptr_t)arg & UCT_PACK_CALLBACK_REDUCE; \
+    if (ucs_unlikely(is_reduce_needed)) { \
         /* Otherwise - reduce onto existing data */ \
-        ucg_builtin_op_step_t *step = (ucg_builtin_op_step_t*)arg; \
-        ucg_builtin_header_t *header_ptr = (ucg_builtin_header_t*)dest; \
-        return sizeof(*header_ptr) + ucg_builtin_atomic_reduce_ ## part \
-                (req, offset, source, header_ptr + 1, length, lock); \
+        ucg_builtin_request_t *req   = (ucg_builtin_request_t*)((uintptr_t)arg \
+                                        ^ UCT_PACK_CALLBACK_REDUCE); \
+        ucg_builtin_op_step_t *step  = req->step; \
+        ucg_builtin_header_t *header = (ucg_builtin_header_t*)dest; \
+        header->header               = step->am_header.header; \
+        return sizeof(*header) + ucg_builtin_atomic_reduce_ ## part \
+                (req, offset, source, header + 1, length); \
+    } else { \
+        UCG_BUILTIN_BCOPY_PACK_CB(source, offset, length) \
     } \
 }
 

@@ -3,6 +3,10 @@
  * See file LICENSE for terms.
  */
 
+#ifdef HAVE_CONFIG_H
+#  include "config.h"
+#endif
+
 #include "ucg_group.h"
 
 #include <ucs/datastruct/queue.h>
@@ -42,29 +46,48 @@ static ucs_stats_class_t ucg_group_stats_class = {
 };
 #endif
 
-#define UCG_GROUP_PROGRESS_ADD(iface, ctx) {         \
-    unsigned idx = 0;                                \
-    if (ucs_unlikely(idx == UCG_GROUP_MAX_IFACES)) { \
-        return UCS_ERR_EXCEEDS_LIMIT;                \
-    }                                                \
-                                                     \
-    while (idx < (ctx)->iface_cnt) {                 \
-        if ((ctx)->ifaces[idx] == (iface)) {         \
-            break;                                   \
-        }                                            \
-        idx++;                                       \
-    }                                                \
-                                                     \
-    if (idx == (ctx)->iface_cnt) {                   \
-        (ctx)->ifaces[(ctx)->iface_cnt++] = (iface); \
-    }                                                \
+#define UCG_GROUP_PROGRESS_ADD(iface, ctx) {          \
+    unsigned _idx = 0;                                \
+    if (ucs_unlikely(_idx == UCG_GROUP_MAX_IFACES)) { \
+        return UCS_ERR_EXCEEDS_LIMIT;                 \
+    }                                                 \
+                                                      \
+    while (_idx < (ctx)->iface_cnt) {                 \
+        if ((ctx)->ifaces[_idx] == (iface)) {         \
+            break;                                    \
+        }                                             \
+        _idx++;                                       \
+    }                                                 \
+                                                      \
+    if (_idx == (ctx)->iface_cnt) {                   \
+        (ctx)->ifaces[(ctx)->iface_cnt++] = (iface);  \
+    }                                                 \
 }
 
 __KHASH_IMPL(ucg_group_ep, static UCS_F_MAYBE_UNUSED inline,
              ucg_group_member_index_t, ucp_ep_h, 1, kh_int64_hash_func,
              kh_int64_hash_equal);
 
-#ifndef HAVE_UCP_EXTENSIONS
+#ifdef HAVE_UCP_EXTENSIONS
+
+/* If UCP supporst extension - UCG is simply a wrapper */
+struct ucg_context { ucp_context_t *super; };
+
+ucs_status_t ucg_worker_create(ucg_context_h context,
+                               const ucp_worker_params_t *params,
+                               ucg_worker_h *worker_p)
+{
+    return ucp_worker_create(context->super, params, worker_p);
+}
+
+#else
+
+/*
+ * Per the UCX community's request to make minimal changes to accomodate UCG,
+ * this code was added - duplicating UCP worker creation in a way UCG can use.
+ */
+#include <ucp/core/ucp_worker.c> /* Needed to provide worker creation logic */
+
 /**
  * This code is intended to reside in UCP, but is "hosted" in UCG for now...
  */
@@ -76,30 +99,19 @@ typedef ucs_status_t (*ucp_ext_init_f)(ucp_worker_h worker,
 typedef void (*ucp_ext_cleanup_f)(void *ext_ctx);
 
 typedef struct ucp_context_extension {
-    ucs_list_link_t list;
-    size_t worker_offset;
-    ucp_ext_init_f init;
-    ucp_ext_cleanup_f cleanup;
+    ucs_list_link_t   list;          /* extension list membership */
+    size_t            worker_offset; /* offset from worker to extension ctx */
+    ucp_ext_init_f    init;          /* extension init function */
+    ucp_ext_cleanup_f cleanup;       /* extension cleanup function */
 } ucp_context_extension_t;
 
 struct ucg_context {
-#ifndef HAVE_UCP_EXTENSIONS
-    ucp_context_t                *super;          /* Extending the UCP context */
-#else
-    ucp_context_t                 super;          /* Extending the UCP context */
-#endif
-    size_t                        worker_size;    /* Worker allocation size */
-    ucs_list_link_t               extensions;     /* List of registered extensions */
-    unsigned                      last_am_id;     /* Last used AM ID */
+    ucp_context_t    *super;          /* Extending the UCP context */
+    size_t            worker_size;    /* Worker allocation size */
+    ucs_list_link_t   extensions;     /* List of registered extensions */
+    unsigned          last_am_id;     /* Last used AM ID */
 };
 
-#ifndef HAVE_UCP_EXTENSIONS
-/*
- * Per the UCX community's request to make minimal changes to accomodate UCG,
- * this code was added - duplicating UCP worker creation in a way UCG can use.
- */
-
-#include <ucp/core/ucp_worker.c> /* Needed to provide worker creation logic */
 
 ucs_status_t ucp_worker_create_by_size(ucp_context_h context,
                                        const ucp_worker_params_t *params,
@@ -309,12 +321,6 @@ ucs_status_t ucg_worker_create(ucg_context_h context,
     return ucp_worker_create_by_size(context->super, params,
             context->worker_size, worker_p);
 }
-
-void ucg_cleanup(ucg_context_h context) {
-    ucp_cleanup(context->super);
-    ucs_free(context);
-}
-#endif
 
 ucs_status_t ucp_extend(ucg_context_h context, size_t extension_ctx_length,
                         ucp_ext_init_f init, ucp_ext_cleanup_f cleanup,
@@ -578,7 +584,7 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_collective_create,
     plan->type              = params->type;
     plan->group_id          = group->group_id;
     plan->group_size        = group->params.member_count;
-#ifdef UCT_COLLECTIVES
+#ifdef HAVE_UCT_COLLECTIVES
     plan->group_host_size   = group->worker->context->config.num_local_peers;
 #endif
     group->cache[coll_mask] = plan;
@@ -723,15 +729,15 @@ static ucs_status_t ucg_worker_groups_init(ucp_worker_h worker,
         ucg_plan_desc_t* planner    = &gctx->planners[planner_idx];
         ucg_plan_component_t* planc = planner->plan_component;
         planc->global_ctx_offset    = global_ctx_offset;
-        global_ctx_offset          += planc->global_context_size;
+        global_ctx_offset          += planc->global_ctx_size;
         planc->group_ctx_offset     = group_ctx_offset;
-        group_ctx_offset           += planc->group_context_size;
+        group_ctx_offset           += planc->per_group_ctx_size;
     }
 
     gctx->next_id             = 0;
     gctx->iface_cnt           = 0;
     gctx->total_planner_sizes = group_ctx_offset;
-#ifdef UCT_COLLECTIVES
+#ifdef HAVE_UCT_COLLECTIVES
     gctx->num_local_peers     = worker->context->config.num_local_peers;
     gctx->my_local_peer_idx   = worker->context->config.my_local_peer_idx;
 #endif
@@ -755,30 +761,36 @@ static void ucg_worker_groups_cleanup(void *groups_ctx)
 
 static ucs_status_t ucg_extend_ucp(const ucg_params_t *params,
                                    const ucg_config_t *config,
-                                   ucg_context_h *context_p)
+                                   ucg_context_h context_p)
 {
-#ifndef HAVE_UCP_EXTENSIONS
-        /* Since UCP doesn't support extensions (yet?) - we need to allocate... */
-        ucg_context_h ucg_context = ucs_calloc(1, sizeof(*ucg_context), "ucg context");
-        if (!ucg_context) {
-            return UCS_ERR_NO_MEMORY;
-        }
+    ucp_context_h ucp_context_p = context_p->super;
 
-        ucg_context->last_am_id = 0;
-        ucg_context->super = (ucp_context_h)context_p;
-        ucg_context->worker_size = sizeof(ucp_worker_t) + sizeof(ucp_ep_config_t) *
-                ucs_min((ucg_context->super->num_tls + 1) *
-                        (ucg_context->super->num_tls + 1) *
-                        (ucg_context->super->num_tls),
-                        UINT8_MAX);
-        *context_p = ucg_context;
+#ifndef HAVE_UCP_EXTENSIONS
+    /* Since UCP doesn't support extensions (yet?) - we need to allocate... */
+    ucg_context_h ucg_context = ucs_calloc(1, sizeof(*ucg_context), "ucg context");
+    if (!ucg_context) {
+        return UCS_ERR_NO_MEMORY;
+    }
+
+    ucg_context->last_am_id = 0;
+    ucg_context->super = (ucp_context_h)context_p;
+    ucs_list_head_init(&(*context_p)->extensions);
+    ucg_context->worker_size = sizeof(ucp_worker_t) + sizeof(ucp_ep_config_t) *
+            ucs_min((ucg_context->super->num_tls + 1) *
+                    (ucg_context->super->num_tls + 1) *
+                    (ucg_context->super->num_tls),
+                    UINT8_MAX);
+    *context_p = ucg_context;
 #endif
 
-        size_t ctx_size = sizeof(ucg_groups_t) +
-                ucs_list_length(&ucg_plan_components_list) * sizeof(void*);
-        ucs_list_head_init(&(*context_p)->extensions);
-        return ucp_extend(*context_p, ctx_size, ucg_worker_groups_init,
-                ucg_worker_groups_cleanup, &ucg_ctx_worker_offset);
+    size_t ctx_size = sizeof(ucg_groups_t);
+    ucg_plan_component_t *planner_iter;
+    ucs_list_for_each(planner_iter, &ucg_plan_components_list, list) {
+        ctx_size += planner_iter->global_ctx_size;
+    }
+
+    return ucp_extend(ucp_context_p, ctx_size, ucg_worker_groups_init,
+            ucg_worker_groups_cleanup, &ucg_ctx_worker_offset);
 }
 
 ucs_status_t ucg_init_version(unsigned api_major_version,
@@ -787,11 +799,27 @@ ucs_status_t ucg_init_version(unsigned api_major_version,
                               const ucg_config_t *config,
                               ucg_context_h *context_p)
 {
-    ucs_status_t status = ucp_init_version(api_major_version, api_minor_version,
-                                           params, config, (ucp_context_h*)context_p);
-    if (status == UCS_OK) {
-        status = ucg_extend_ucp(params, config, context_p);
+    ucg_context_h ucg_context_p = ucs_malloc(sizeof(struct ucg_context),
+                                             "ucg_context");
+    if (!ucg_context_p) {
+        return UCS_ERR_NO_MEMORY;
     }
+
+    ucs_status_t status = ucp_init_version(api_major_version, api_minor_version,
+                                           params, config, &ucg_context_p->super);
+    if (status != UCS_OK) {
+        goto ucg_init_version_ctx_cleanup;
+    }
+
+    status = ucg_extend_ucp(params, config, ucg_context_p);
+    if (status == UCS_OK) {
+        *context_p = ucg_context_p;
+        return UCS_OK;
+    }
+
+    ucp_cleanup(ucg_context_p->super);
+ucg_init_version_ctx_cleanup:
+    ucs_free(ucg_context_p);
     return status;
 }
 
@@ -799,12 +827,28 @@ ucs_status_t ucg_init(const ucg_params_t *params,
                       const ucg_config_t *config,
                       ucg_context_h *context_p)
 {
-    ucs_status_t status = ucp_init(params, config, (ucp_context_h*)context_p);
-    if (status == UCS_OK) {
-        status = ucg_extend_ucp(params, config, context_p);
-    }
-    return status;
+    return ucg_init_version(UCG_API_MAJOR, UCG_API_MINOR, params, config,
+                            context_p);
 }
+
+void ucg_cleanup(ucg_context_h context_p)
+{
+    ucp_cleanup(context_p->super);
+    ucs_free(context_p->super);
+}
+
+ucs_status_t ucg_context_query(ucg_context_h context_p,
+                               ucg_context_attr_t *attr)
+{
+    return ucp_context_query(context_p->super, attr);
+}
+
+
+void ucg_context_print_info(const ucg_context_h context, FILE *stream)
+{
+    ucp_context_print_info(context->super, stream);
+}
+
 
 ucs_status_t ucg_plan_connect(ucg_group_h group,
                               ucg_group_member_index_t idx,
@@ -857,7 +901,7 @@ ucs_status_t ucg_plan_connect(ucg_group_h group,
     /* Connect for point-to-point communication */
     ucp_lane_index_t lane;
 am_retry:
-#ifdef UCT_COLLECTIVES
+#ifdef HAVE_UCT_COLLECTIVES
     if (flags & UCG_PLAN_CONNECT_FLAG_WANT_INCAST) {
         lane = ucp_ep_get_incast_lane(ucp_ep);
         if (ucs_unlikely(lane == UCP_NULL_LANE)) {
@@ -875,7 +919,7 @@ am_retry:
         }
         *ep_p = ucp_ep_get_bcast_uct_ep(ucp_ep);
     } else
-#endif /* UCT_COLLECTIVES */
+#endif /* HAVE_UCT_COLLECTIVES */
     {
         lane  = ucp_ep_get_am_lane(ucp_ep);
         *ep_p = ucp_ep_get_am_uct_ep(ucp_ep);

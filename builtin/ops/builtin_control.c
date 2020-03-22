@@ -143,7 +143,7 @@ ucs_status_t ucg_builtin_op_select_callbacks(ucg_builtin_plan_t *plan,
     return UCS_OK;
 }
 
-static UCS_F_ALWAYS_INLINE ucs_status_t
+static inline ucs_status_t
 ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
                             ucg_builtin_plan_phase_t *phase,
                             const ucg_collective_params_t *params,
@@ -155,11 +155,11 @@ ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
     /*
      * Short messages (e.g. RDMA "inline")
      */
-    if (ucs_likely(length <= phase->max_short_one)) {
+    if (ucs_likely(length < phase->max_short_one)) {
         /* Short send - single message */
         *send_flag            = UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_SHORT;
         step->fragments       = 1;
-    } else if (ucs_likely(length <= phase->max_short_max)) {
+    } else if (ucs_likely(length < phase->max_short_max)) {
         /* Short send - multiple messages */
         *send_flag            = (enum ucg_builtin_op_step_flags)
                                 (UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_SHORT |
@@ -173,7 +173,7 @@ ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
     /*
      * Large messages, if supported (e.g. RDMA "zero-copy")
      */
-    } else if (ucs_unlikely((length >  phase->max_bcopy_max) &&
+    } else if (ucs_unlikely((length > phase->max_bcopy_max) &&
                             (phase->md_attr->cap.max_reg))) {
         if (ucs_likely(length < phase->max_zcopy_one)) {
             /* ZCopy send - single message */
@@ -192,7 +192,7 @@ ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
     /*
      * Medium messages
      */
-    } else if (ucs_likely(length <= phase->max_bcopy_one)) {
+    } else if (ucs_likely(length < phase->max_bcopy_one)) {
         /* BCopy send - single message */
         *send_flag            = UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_BCOPY;
         step->fragment_length = step->buffer_length;
@@ -227,16 +227,17 @@ ucs_status_t ucg_builtin_step_create(ucg_builtin_plan_phase_t *phase,
                                                       phase->multi_eps[0]->iface;
     }
     /* Note: we assume all the UCT endpoints have the same interface */
-    step->phase                  = phase;
-    step->am_id                  = base_am_id;
-    step->batch_cnt              = phase->host_proc_cnt - 1;
-    step->am_header.group_id     = group_id;
-    step->am_header.msg.step_idx = phase->step_index;
-    step->iter_ep                = 0;
-    step->iter_offset            = 0;
-    step->fragment_pending       = NULL;
-    step->recv_buffer            = (int8_t*)params->recv.buf;
-    step->send_buffer            = ((params->send.buf == MPI_IN_PLACE) ||
+    step->phase                   = phase;
+    step->am_id                   = base_am_id;
+    step->batch_cnt               = phase->host_proc_cnt - 1;
+    step->am_header.group_id      = group_id;
+    step->am_header.msg.step_idx  = phase->step_index;
+    step->am_header.remote_offset = 0;
+    step->iter_ep                 = 0;
+    step->iter_offset             = 0;
+    step->fragment_pending        = NULL;
+    step->recv_buffer             = (int8_t*)params->recv.buf;
+    step->send_buffer             = ((params->send.buf == MPI_IN_PLACE) ||
             !(extra_flags & UCG_BUILTIN_OP_STEP_FLAG_FIRST_STEP)) ?
                     (int8_t*)params->recv.buf : (int8_t*)params->send.buf;
     if (*current_data_buffer) {
@@ -267,12 +268,18 @@ ucs_status_t ucg_builtin_step_create(ucg_builtin_plan_phase_t *phase,
         step->calc_cb     = ucg_builtin_calc_scatter;
         /* no break */
     case UCG_PLAN_METHOD_SEND_TERMINAL:
+        if (phase->iface_attr->cap.flags & UCT_IFACE_FLAG_INCAST) {
+            extra_flags  |= UCG_BUILTIN_OP_STEP_FLAG_BATCHED;
+        }
         step->flags       = send_flag | extra_flags;
         break;
 
     /* Recv-only */
     case UCG_PLAN_METHOD_RECV_TERMINAL:
     case UCG_PLAN_METHOD_REDUCE_TERMINAL:
+        if (phase->iface_attr->cap.flags & UCT_IFACE_FLAG_INCAST) {
+            extra_flags  |= UCG_BUILTIN_OP_STEP_FLAG_BATCHED;
+        }
         extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_RECV_AFTER_SEND;
         step->flags       = extra_flags;
         break;
@@ -282,6 +289,9 @@ ucs_status_t ucg_builtin_step_create(ucg_builtin_plan_phase_t *phase,
         extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_CALC_SENT_BUFFERS;
         /* no break */
     case UCG_PLAN_METHOD_REDUCE_WAYPOINT:
+        if (phase->iface_attr->cap.flags & UCT_IFACE_FLAG_INCAST) {
+            extra_flags  |= UCG_BUILTIN_OP_STEP_FLAG_BATCHED;
+        }
         if (send_flag & UCG_BUILTIN_OP_STEP_FLAG_FRAGMENTED) {
             extra_flags  |= UCG_BUILTIN_OP_STEP_FLAG_PIPELINED;
         }
@@ -340,13 +350,10 @@ ucs_status_t ucg_builtin_step_create(ucg_builtin_plan_phase_t *phase,
     if (phase->ep_cnt == 1) {
         step->flags |= UCG_BUILTIN_OP_STEP_FLAG_SINGLE_ENDPOINT;
     }
-    if (step->flags & send_flag) {
-        step->am_header.remote_offset = 0;
-    }
 
     /* memory registration (using the memory registration cache) */
     if (send_flag & UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_ZCOPY) {
-        ucs_status_t status = ucg_builtin_step_zcopy_prep(step);
+        status = ucg_builtin_step_zcopy_prep(step);
         if (ucs_unlikely(status != UCS_OK)) {
             return status;
         }
@@ -360,12 +367,7 @@ ucs_status_t ucg_builtin_step_create(ucg_builtin_plan_phase_t *phase,
 
     /* Select the right completion callback */
     return ucg_builtin_step_select_callbacks(phase, &step->recv_cb, step->flags,
-#ifdef HAVE_UCP_EXTENSIONS
-            phase->ep_attr->cap.align_incast,
-#else
-            0,
-#endif
-            params->send.count > 0);
+                                             params->send.count > 0);
 }
 
 ucs_status_t ucg_builtin_op_create(ucg_plan_t *plan,

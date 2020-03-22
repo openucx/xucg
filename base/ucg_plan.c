@@ -36,17 +36,22 @@ static ucs_status_t ucg_plan_config_read(ucg_config_bundle_t **bundle,
                                          size_t config_size, const char *env_prefix,
                                          const char *cfg_prefix)
 {
+    /* TODO: code duplication from uct_config_read() */
+
+    char full_prefix[128] = UCS_DEFAULT_ENV_PREFIX;
     ucg_config_bundle_t *config_bundle;
     ucs_status_t status;
 
-    config_bundle = ucs_calloc(1, sizeof(*config_bundle) + config_size, "uct_config");
-    if (config_bundle == NULL) {
-        status = UCS_ERR_NO_MEMORY;
-        goto err;
+    config_bundle = UCS_ALLOC_CHECK(sizeof(*config_bundle) + config_size, "ucg_config");
+
+    /* TODO use env_prefix */
+    if ((env_prefix != NULL) && (strlen(env_prefix) > 0)) {
+        ucs_snprintf_zero(full_prefix, sizeof(full_prefix), "%s_%s",
+                          env_prefix, UCS_DEFAULT_ENV_PREFIX);
     }
 
     status = ucs_config_parser_fill_opts(config_bundle->data, config_table,
-                                         env_prefix, cfg_prefix, 0);
+                                         full_prefix, cfg_prefix, 0);
     if (status != UCS_OK) {
         goto err_free_bundle;
     }
@@ -63,7 +68,6 @@ static ucs_status_t ucg_plan_config_read(ucg_config_bundle_t **bundle,
 
 err_free_bundle:
     ucs_free(config_bundle);
-err:
     return status;
 }
 

@@ -87,9 +87,9 @@ ucg_builtin_step_am_short_max(ucg_builtin_request_t *req,
 }
 
 void static UCS_F_ALWAYS_INLINE
-ucg_builtin_step_select_packers(uct_pack_locked_callback_t *packer_full_cb,
-                                uct_pack_locked_callback_t *packer_part_cb,
-                                uct_pack_locked_callback_t *packer_single_cb,
+ucg_builtin_step_select_packers(uct_pack_callback_t *packer_full_cb,
+                                uct_pack_callback_t *packer_part_cb,
+                                uct_pack_callback_t *packer_single_cb,
                                 int is_locked, int use_rbuf)
 {
     if (packer_full_cb) {
@@ -125,11 +125,11 @@ ucg_builtin_step_am_bcopy_one(ucg_builtin_request_t *req,
     UCG_BUILTIN_ASSERT_SEND(step, BCOPY);
 
     /* Select bcopy packer callback */
-    uct_pack_locked_callback_t packer_cb;
+    uct_pack_callback_t packer_cb;
     ucg_builtin_step_select_packers(NULL, NULL, &packer_cb, is_locked, use_rbuf);
 
     /* send active message to remote endpoint */
-    ssize_t len = step->uct_iface->ops.ep_am_bcopy_locked(ep, step->am_id, packer_cb, step, 0);
+    ssize_t len = step->uct_iface->ops.ep_am_bcopy(ep, step->am_id, packer_cb, req, 0);
     return (ucs_unlikely(len < 0)) ? (ucs_status_t)len : UCS_OK;
 }
 
@@ -142,11 +142,11 @@ ucg_builtin_step_am_bcopy_max(ucg_builtin_request_t *req,
     unsigned am_id          = step->am_id;
     ucg_offset_t frag_size  = step->fragment_length;
     ucg_offset_t iter_limit = step->buffer_length - frag_size;
-    packed_send_t send_func = step->uct_iface->ops.ep_am_bcopy_locked;
+    packed_send_t send_func = step->uct_iface->ops.ep_am_bcopy;
 
     /* Select bcopy packer callback */
-    uct_pack_locked_callback_t packer_full_cb;
-    uct_pack_locked_callback_t packer_part_cb;
+    uct_pack_callback_t packer_full_cb;
+    uct_pack_callback_t packer_part_cb;
     ucg_builtin_step_select_packers(&packer_full_cb, &packer_part_cb,
             NULL, is_locked, use_rbuf);
 
@@ -158,7 +158,7 @@ ucg_builtin_step_am_bcopy_max(ucg_builtin_request_t *req,
     if (ucs_likely(step->iter_offset < iter_limit)) {
         /* send every fragment but the last */
         do {
-            len = send_func(ep, am_id, packer_full_cb, step, 0);
+            len = send_func(ep, am_id, packer_full_cb, req, 0);
 
             if (is_single_send) {
                 return ucs_unlikely(len < 0) ? (ucs_status_t)len : UCS_OK;
@@ -176,7 +176,7 @@ ucg_builtin_step_am_bcopy_max(ucg_builtin_request_t *req,
     }
 
     /* Send last fragment of the message */
-    len = send_func(ep, am_id, packer_part_cb, step, 0);
+    len = send_func(ep, am_id, packer_part_cb, req, 0);
     if (ucs_unlikely(len < 0)) {
         return (ucs_status_t)len;
     }
@@ -298,7 +298,7 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
 #define case_send_full(/* General parameters */                                \
                        req, ureq, step, phase,                                 \
                        /* Receive-related indicators, for non-send-only steps*/\
-                       _is_recv, _is_rs1, _is_r1s, _is_rbuf, _is_locked,       \
+                       _is_recv, _is_rs1, _is_r1s, _is_rbuf, _is_batched,       \
                        _is_pipelined,                                          \
                        /* Step-completion-related indicators */                \
                        _is_first, _is_last, _is_one_ep,                        \
@@ -309,7 +309,7 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
          (_is_last      ? UCG_BUILTIN_OP_STEP_FLAG_LAST_STEP          : 0) |   \
          (_is_first     ? UCG_BUILTIN_OP_STEP_FLAG_FIRST_STEP         : 0) |   \
          (_is_pipelined ? UCG_BUILTIN_OP_STEP_FLAG_PIPELINED          : 0) |   \
-         (_is_locked    ? UCG_BUILTIN_OP_STEP_FLAG_LOCKED_PACK_CB     : 0) |   \
+         (_is_batched   ? UCG_BUILTIN_OP_STEP_FLAG_BATCHED            : 0) |   \
          (_is_rbuf      ? UCG_BUILTIN_OP_STEP_FLAG_SEND_FROM_RECV_BUF : 0) |   \
          (_is_r1s       ? UCG_BUILTIN_OP_STEP_FLAG_RECV1_BEFORE_SEND  : 0) |   \
          (_is_rs1       ? UCG_BUILTIN_OP_STEP_FLAG_RECV_BEFORE_SEND1  : 0) |   \
@@ -353,7 +353,7 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
             ucs_assert(!_is_pipelined); /* makes no sense in single-ep case */ \
             do {                                                               \
                 status = _send_func (req, step, phase->single_ep, 0,           \
-                                     _is_locked, _is_rbuf);                    \
+                                     _is_batched, _is_rbuf);                   \
                 if (ucs_unlikely(UCS_STATUS_IS_ERR(status))) {                 \
                     goto step_execute_error;                                   \
                 }                                                              \
@@ -382,7 +382,7 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
             ep_last += phase->ep_cnt;                                          \
             do {                                                               \
                 status = _send_func (req, step, *ep_iter,                      \
-                                     _is_pipelined, _is_locked, _is_rbuf);     \
+                                     _is_pipelined, _is_batched, _is_rbuf);     \
                 if (ucs_unlikely(UCS_STATUS_IS_ERR(status))) {                 \
                     /* Store the pointer, e.g. for UCS_ERR_NO_RESOURCE */      \
                     step->iter_ep = ep_iter - phase->multi_eps;                \
@@ -450,25 +450,25 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
         }                                                                      \
         break;
 
-#define case_send_rs1(r, u, s, p,    _is_rs1, _is_r1s, _is_rbuf, _is_locked, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
-       case_send_full(r, u, s, p, 0, _is_rs1, _is_r1s, _is_rbuf, _is_locked, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
-       case_send_full(r, u, s, p, 1, _is_rs1, _is_r1s, _is_rbuf, _is_locked, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func)
+#define case_send_rs1(r, u, s, p,    _is_rs1, _is_r1s, _is_rbuf, _is_batched, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
+       case_send_full(r, u, s, p, 0, _is_rs1, _is_r1s, _is_rbuf, _is_batched, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
+       case_send_full(r, u, s, p, 1, _is_rs1, _is_r1s, _is_rbuf, _is_batched, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func)
 
-#define case_send_r1s(r, u, s, p,    _is_r1s, _is_rbuf, _is_locked, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
-        case_send_rs1(r, u, s, p, 0, _is_r1s, _is_rbuf, _is_locked, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
-        case_send_rs1(r, u, s, p, 1, _is_r1s, _is_rbuf, _is_locked, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func)
+#define case_send_r1s(r, u, s, p,    _is_r1s, _is_rbuf, _is_batched, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
+        case_send_rs1(r, u, s, p, 0, _is_r1s, _is_rbuf, _is_batched, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
+        case_send_rs1(r, u, s, p, 1, _is_r1s, _is_rbuf, _is_batched, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func)
 
-#define case_send_rbuf(r, u, s, p,    _is_rbuf, _is_locked, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
-         case_send_r1s(r, u, s, p, 0, _is_rbuf, _is_locked, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
-         case_send_r1s(r, u, s, p, 1, _is_rbuf, _is_locked, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func)
+#define case_send_rbuf(r, u, s, p,    _is_rbuf, _is_batched, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
+         case_send_r1s(r, u, s, p, 0, _is_rbuf, _is_batched, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
+         case_send_r1s(r, u, s, p, 1, _is_rbuf, _is_batched, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func)
 
-#define case_send_locked(r, u, s, p,    _is_locked, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
-          case_send_rbuf(r, u, s, p, 0, _is_locked, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
-          case_send_rbuf(r, u, s, p, 1, _is_locked, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func)
+#define case_send_batched(r, u, s, p,    _is_batched, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
+           case_send_rbuf(r, u, s, p, 0, _is_batched, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
+           case_send_rbuf(r, u, s, p, 1, _is_batched, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func)
 
-#define   case_send_ppld(r, u, s, p,    _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
-        case_send_locked(r, u, s, p, 0, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
-        case_send_locked(r, u, s, p, 1, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func)
+#define    case_send_ppld(r, u, s, p,    _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
+        case_send_batched(r, u, s, p, 0, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
+        case_send_batched(r, u, s, p, 1, _is_ppld, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func)
 
 #define case_send_first(r, u, s, p,    _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \
          case_send_ppld(r, u, s, p, 0, _is_first, _is_last, _is_one_ep, _is_calc, _send_flag, _send_func) \

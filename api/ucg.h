@@ -50,42 +50,20 @@ BEGIN_C_DECLS
  * Since UCG works on top of UCP, most of the functionality overlaps. For API
  * completeness, UCG presents a full-featured API with the "ucg_" prefix.
  */
-#define HAVE_UCP_EXTENSIONS
 #define ucg_worker_h                ucp_worker_h
-#ifndef HAVE_UCP_EXTENSIONS
-typedef struct ucg_context         *ucg_context_h;
-ucs_status_t ucg_worker_create(ucg_context_h context,
-                               const ucp_worker_params_t *params,
-                               ucg_worker_h *worker_p);
-void ucg_cleanup(ucg_context_h context);
-
-#define UCS_ALLOC_CHECK(size, name) ({ \
-    void* ptr = ucs_malloc(size, name); \
-    if (ptr == 0) return UCS_ERR_NO_MEMORY; \
-    ptr; \
-})
-
-#define uct_pack_locked_callback_t  uct_pack_callback_t
-#define ep_am_bcopy_locked          ep_am_bcopy
-#else
-#define ucg_context_h               ucp_context_h
-#define ucg_worker_create           ucp_worker_create
-#define ucg_cleanup                 ucp_cleanup
-#endif
 #define ucg_config_t                ucp_config_t
 #define ucg_address_t               ucp_address_t
 #define ucg_params_t                ucp_params_t
 #define ucg_context_attr_t          ucp_context_attr_t
 #define ucg_worker_attr_t           ucp_worker_attr_t
 #define ucg_worker_params_t         ucp_worker_params_t
+
 #define ucg_config_read             ucp_config_read
 #define ucg_config_release          ucp_config_release
 #define ucg_config_modify           ucp_config_modify
 #define ucg_config_print            ucp_config_print
 #define ucg_get_version             ucp_get_version
 #define ucg_get_version_string      ucp_get_version_string
-#define ucg_context_query           ucp_context_query
-#define ucg_context_print_info      ucp_context_print_info
 #define ucg_worker_destroy          ucp_worker_destroy
 #define ucg_worker_query            ucp_worker_query
 #define ucg_worker_print_info       ucp_worker_print_info
@@ -167,6 +145,7 @@ typedef struct ucg_collective_type {
  */
 enum ucg_group_member_distance {
     UCG_GROUP_MEMBER_DISTANCE_SELF   = 0, /* This is the calling member */
+    UCG_GROUP_MEMBER_DISTANCE_CACHE  = UCS_MASK(1), /* member shares cache memory */
     /* Reserved for in-socket proximity values */
     UCG_GROUP_MEMBER_DISTANCE_SOCKET = UCS_MASK(3), /* member is on the same socket */
     /* Reserved for in-host proximity values */
@@ -502,6 +481,86 @@ ucs_status_t ucg_init_version(unsigned api_major_version,
 ucs_status_t ucg_init(const ucg_params_t *params,
                       const ucg_config_t *config,
                       ucg_context_h *context_p);
+
+
+/**
+ * @ingroup UCG_CONTEXT
+ * @brief Release UCG application context.
+ *
+ * This routine finalizes and releases the resources associated with a
+ * @ref ucg_context_h "UCG application context".
+ *
+ * @warning An application cannot call any UCG routine
+ * once the UCG application context released.
+ *
+ * The cleanup process releases and shuts down all resources associated with
+ * the application context. After calling this routine, calling any UCG
+ * routine without calling @ref ucg_init "UCG initialization routine" is invalid.
+ *
+ * @param [in] context_p   Handle to @ref ucg_context_h
+ *                         "UCG application context".
+ */
+void ucg_cleanup(ucg_context_h context_p);
+
+
+/**
+ * @ingroup UCG_CONTEXT
+ * @brief Get attributes specific to a particular context.
+ *
+ * This routine fetches information about the context.
+ *
+ * @param [in]  context_p  Handle to @ref ucg_context_h
+ *                         "UCG application context".
+ *
+ * @param [out] attr       Filled with attributes of @p context_p context.
+ *
+ * @return Error code as defined by @ref ucs_status_t
+ */
+ucs_status_t ucg_context_query(ucg_context_h context_p,
+                               ucg_context_attr_t *attr);
+
+
+/**
+ * @ingroup UCG_CONTEXT
+ * @brief Print context information.
+ *
+ * This routine prints information about the context configuration: including
+ * memory domains, transport resources, and other useful information associated
+ * with the context.
+ *
+ * @param [in] context      Print this context object's configuration.
+ * @param [in] stream       Output stream on which to print the information.
+ */
+void ucg_context_print_info(const ucg_context_h context, FILE *stream);
+
+
+/**
+ * @ingroup UCG_WORKER
+ * @brief Create a worker object.
+ *
+ * This routine allocates and initializes a @ref ucg_worker_h "worker" object.
+ * Each worker is associated with one and only one @ref ucg_context_h
+ * "application" context.  In the same time, an application context can create
+ * multiple @ref ucg_worker_h "workers" in order to enable concurrent access to
+ * communication resources. For example, application can allocate a dedicated
+ * worker for each application thread, where every worker can be progressed
+ * independently of others.
+ *
+ * @note The worker object is allocated within context of the calling thread
+ *
+ * @param [in] context     Handle to @ref ucg_context_h
+ *                         "UCG application context".
+ * @param [in] params      User defined @ref ucg_worker_params_t configurations for the
+ *                         @ref ucg_worker_h "UCG worker".
+ * @param [out] worker_p   A pointer to the worker object allocated by the
+ *                         UCG library
+ *
+ * @return Error code as defined by @ref ucs_status_t
+ */
+ucs_status_t ucg_worker_create(ucg_context_h context,
+                               const ucg_worker_params_t *params,
+                               ucg_worker_h *worker_p);
+
 
 END_C_DECLS
 

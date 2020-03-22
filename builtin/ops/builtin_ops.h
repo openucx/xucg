@@ -6,9 +6,21 @@
 #ifndef UCG_BUILTIN_OPS_H_
 #define UCG_BUILTIN_OPS_H_
 
+#ifdef HAVE_CONFIG_H
+#  include "config.h"
+#endif
+
 #include "../plan/builtin_plan.h"
 #include <ucp/core/ucp_request.h>
 #include <ucs/datastruct/ptr_array.h>
+
+#ifdef HAVE_UCP_EXTENSIONS
+#define UCS_ALLOC_CHECK(size, name) ({ \
+    void* ptr = ucs_malloc(size, name); \
+    if (ptr == 0) return UCS_ERR_NO_MEMORY; \
+    ptr; \
+})
+#endif
 
 BEGIN_C_DECLS
 
@@ -69,7 +81,7 @@ enum ucg_builtin_op_step_flags {
     UCG_BUILTIN_OP_STEP_FLAG_CALC_SENT_BUFFERS  = UCS_BIT(6),
     UCG_BUILTIN_OP_STEP_FLAG_FRAGMENTED         = UCS_BIT(7),
     UCG_BUILTIN_OP_STEP_FLAG_PIPELINED          = UCS_BIT(8),
-    UCG_BUILTIN_OP_STEP_FLAG_LOCKED_PACK_CB     = UCS_BIT(9),
+    UCG_BUILTIN_OP_STEP_FLAG_BATCHED            = UCS_BIT(9),
     UCG_BUILTIN_OP_STEP_FLAG_SEND_FROM_RECV_BUF = UCS_BIT(10),
 
     /* Send types */
@@ -173,11 +185,9 @@ ucs_status_t ucg_builtin_step_create (ucg_builtin_plan_phase_t *phase,
                                       ucg_builtin_op_step_t *step);
 ucs_status_t ucg_builtin_step_execute(ucg_builtin_request_t *req,
                                       ucg_request_t **user_req);
-#define NO_INCAST_SUPPORT ((size_t)-1)
 ucs_status_t ucg_builtin_step_select_callbacks(ucg_builtin_plan_phase_t *phase,
                                                ucg_builtin_comp_recv_cb_t *recv_cb,
-                                               int flags, size_t align_incast,
-                                               int nonzero_length);
+                                               int flags, int nonzero_length);
 ucs_status_t ucg_builtin_op_select_callback(ucg_builtin_plan_t *plan,
                                             ucg_builtin_op_init_cb_t *init_cb);
 ucs_status_t ucg_builtin_step_zcopy_prep(ucg_builtin_op_step_t *step);
@@ -195,20 +205,14 @@ ucs_status_t ucg_builtin_op_trigger(ucg_op_t *op,
 /*
  * Macros to generate the headers of all bcopy packing callback functions.
  */
-typedef ssize_t (*packed_send_t)(uct_ep_h, uint8_t, uct_pack_locked_callback_t, void*, unsigned);
+typedef ssize_t (*packed_send_t)(uct_ep_h, uint8_t, uct_pack_callback_t, void*, unsigned);
 
 #define UCG_BUILTIN_PACKER_NAME(_modifier, _mode, _buffer) \
     ucg_builtin_step_am_bcopy_pack ## _modifier ## _mode ## _buffer
 
-#ifdef HAVE_UCP_EXTENSIONS
-#define UCG_BUILTIN_PACKER_DECLARE(_modifier, _mode, _buffer) \
-    size_t UCG_BUILTIN_PACKER_NAME(_modifier, _mode, _buffer) \
-        (void *dest, ucs_spinlock_t *lock, void *arg)
-#else
 #define UCG_BUILTIN_PACKER_DECLARE(_modifier, _mode, _buffer) \
     size_t UCG_BUILTIN_PACKER_NAME(_modifier, _mode, _buffer) \
         (void *dest, void *arg)
-#endif
 
 #define UCG_BUILTIN_PACKER_DECLARE_BY_BUFFER(_modifier, _mode) \
         UCG_BUILTIN_PACKER_DECLARE(_modifier, _mode, _sbuf); \
