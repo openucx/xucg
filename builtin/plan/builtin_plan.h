@@ -63,7 +63,7 @@ typedef struct ucg_builtin_plan_phase {
 
     uct_md_h                          md;            /* memory (registration) domain */
     const uct_md_attr_t              *md_attr;       /* memory domain attributes */
-    const uct_iface_attr_t           *ep_attr;       /* endpoint attributes */
+    const uct_iface_attr_t           *iface_attr;    /* interface attributes */
 
 #if ENABLE_DEBUG_DATA || ENABLE_FAULT_TOLERANCE
     ucg_group_member_index_t         *indexes;       /* array corresponding to EPs */
@@ -100,7 +100,7 @@ typedef struct ucg_builtin_config ucg_builtin_config_t;
 
 typedef struct ucg_builtin_tree_config {
     unsigned radix;
-#define UCG_BUILTIN_TREE_MAX_RADIX (32)
+#define UCG_BUILTIN_TREE_MAX_RADIX (128)
     unsigned sock_thresh;
 } ucg_builtin_tree_config_t;
 

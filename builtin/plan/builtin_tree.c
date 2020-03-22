@@ -42,6 +42,7 @@ static inline ucs_status_t ucg_builtin_tree_connect_phase(ucg_builtin_plan_phase
     ucs_assert(peer_cnt > 0);
     if ((peer_cnt == 1) || coll_flags) {
         ucg_group_member_index_t peer = peers[0];
+#ifdef HAVE_UCT_COLLECTIVES
         if (coll_flags & (UCG_PLAN_CONNECT_FLAG_WANT_INCAST |
                           UCG_PLAN_CONNECT_FLAG_WANT_BCAST)) {
             /* For some methods, e.g. REDUCE_TERMINAL, the peer is the message
@@ -53,6 +54,7 @@ static inline ucs_status_t ucg_builtin_tree_connect_phase(ucg_builtin_plan_phase
                 peer = params->root; /* Should be myself... TODO: validate! */
             }
         }
+#endif
 
         ucs_status_t status = ucg_builtin_single_connection_phase(params->ctx,
                 peer, step_index, method, coll_flags, phase, is_mock);

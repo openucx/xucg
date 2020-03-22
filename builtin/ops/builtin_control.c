@@ -25,6 +25,12 @@ void ucg_builtin_init_gather(ucg_builtin_op_t *op, ucg_coll_id_t coll_id)
             step->send_buffer, len);
 }
 
+void ucg_builtin_init_reduce_recursive(ucg_builtin_op_t *op, ucg_coll_id_t coll_id)
+{
+    ucg_builtin_op_step_t *step = &op->steps[0];
+    memcpy(step->recv_buffer, op->super.params.send.buf, step->buffer_length);
+}
+
 void ucg_builtin_init_reduce(ucg_builtin_op_t *op, ucg_coll_id_t coll_id)
 {
     /* Skip unless root */
@@ -33,7 +39,7 @@ void ucg_builtin_init_reduce(ucg_builtin_op_t *op, ucg_coll_id_t coll_id)
     }
 
     ucg_builtin_op_step_t *step = &op->steps[0];
-    memcpy(step->recv_buffer, step->send_buffer, step->buffer_length);
+    memcpy(step->recv_buffer, op->super.params.send.buf, step->buffer_length);
 }
 
 /* Alltoall Bruck phase 1/3: shuffle the data */
@@ -117,8 +123,11 @@ ucs_status_t ucg_builtin_op_select_callbacks(ucg_builtin_plan_t *plan,
     switch (plan->phss[0].method) {
     case UCG_PLAN_METHOD_REDUCE_WAYPOINT:
     case UCG_PLAN_METHOD_REDUCE_TERMINAL:
-    case UCG_PLAN_METHOD_REDUCE_RECURSIVE:
         *init_cb = ucg_builtin_init_reduce;
+        break;
+
+    case UCG_PLAN_METHOD_REDUCE_RECURSIVE:
+        *init_cb = ucg_builtin_init_reduce_recursive;
         break;
 
     case UCG_PLAN_METHOD_GATHER_WAYPOINT:
@@ -143,23 +152,26 @@ ucs_status_t ucg_builtin_op_select_callbacks(ucg_builtin_plan_t *plan,
     return UCS_OK;
 }
 
-static UCS_F_ALWAYS_INLINE ucs_status_t
+static inline ucs_status_t
 ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
                             ucg_builtin_plan_phase_t *phase,
                             const ucg_collective_params_t *params,
                             enum ucg_builtin_op_step_flags *send_flag)
 {
-    size_t length    = step->buffer_length;
-    size_t dt_len    = params->send.dt_len;
+    size_t length      = step->buffer_length;
+    size_t dt_len      = params->send.dt_len;
+    int supports_short = phase->iface_attr->cap.flags & UCT_IFACE_FLAG_AM_SHORT;
+    int supports_bcopy = phase->iface_attr->cap.flags & UCT_IFACE_FLAG_AM_BCOPY;
+    int supports_zcopy = phase->iface_attr->cap.flags & UCT_IFACE_FLAG_AM_ZCOPY;
 
     /*
      * Short messages (e.g. RDMA "inline")
      */
-    if (ucs_likely(length <= phase->max_short_one)) {
+    if (ucs_likely(length <= phase->max_short_one && supports_short)) {
         /* Short send - single message */
         *send_flag            = UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_SHORT;
         step->fragments       = 1;
-    } else if (ucs_likely(length <= phase->max_short_max)) {
+    } else if (ucs_likely(length <= phase->max_short_max && supports_short)) {
         /* Short send - multiple messages */
         *send_flag            = (enum ucg_builtin_op_step_flags)
                                 (UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_SHORT |
@@ -173,9 +185,8 @@ ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
     /*
      * Large messages, if supported (e.g. RDMA "zero-copy")
      */
-    } else if (ucs_unlikely((length >  phase->max_bcopy_max) &&
-                            (phase->md_attr->cap.max_reg))) {
-        if (ucs_likely(length < phase->max_zcopy_one)) {
+    } else if (ucs_unlikely(length > phase->max_bcopy_max && supports_zcopy)) {
+        if (ucs_likely(length <= phase->max_zcopy_one)) {
             /* ZCopy send - single message */
             *send_flag            = UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_ZCOPY;
             step->fragments       = 1;
@@ -192,7 +203,7 @@ ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
     /*
      * Medium messages
      */
-    } else if (ucs_likely(length <= phase->max_bcopy_one)) {
+    } else if (ucs_likely(length <= phase->max_bcopy_one && supports_bcopy)) {
         /* BCopy send - single message */
         *send_flag            = UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_BCOPY;
         step->fragment_length = step->buffer_length;
@@ -212,44 +223,48 @@ ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
 }
 
 ucs_status_t ucg_builtin_step_create(ucg_builtin_plan_phase_t *phase,
-                                     unsigned extra_flags,
+                                     enum ucg_builtin_op_step_flags *flags,
                                      unsigned base_am_id,
                                      ucg_group_id_t group_id,
                                      const ucg_collective_params_t *params,
                                      int8_t **current_data_buffer,
                                      ucg_builtin_op_step_t *step)
 {
-    /* Set the parameters determining the send-flags later on */
-    step->buffer_length      = params->send.dt_len * params->send.count;
-    step->uct_md             = phase->md;
-    if (phase->md) {
-        step->uct_iface      = (phase->ep_cnt == 1) ? phase->single_ep->iface :
-                                                      phase->multi_eps[0]->iface;
-    }
-    /* Note: we assume all the UCT endpoints have the same interface */
-    step->phase                  = phase;
-    step->am_id                  = base_am_id;
-    step->batch_cnt              = phase->host_proc_cnt - 1;
-    step->am_header.group_id     = group_id;
-    step->am_header.msg.step_idx = phase->step_index;
-    step->iter_ep                = 0;
-    step->iter_offset            = 0;
-    step->fragment_pending       = NULL;
-    step->recv_buffer            = (int8_t*)params->recv.buf;
-    step->send_buffer            = ((params->send.buf == MPI_IN_PLACE) ||
-            !(extra_flags & UCG_BUILTIN_OP_STEP_FLAG_FIRST_STEP)) ?
-                    (int8_t*)params->recv.buf : (int8_t*)params->send.buf;
-    if (*current_data_buffer) {
-        step->send_buffer = *current_data_buffer;
-    } else {
-        *current_data_buffer = step->recv_buffer;
-    }
     ucs_assert(base_am_id >= UCP_AM_ID_LAST);
+
+    /* Set the parameters determining the send-flags later on */
+    step->buffer_length           = params->send.dt_len * params->send.count;
+    step->phase                   = phase;
+    step->am_id                   = base_am_id;
+    step->batch_cnt               = phase->host_proc_cnt - 1;
+    step->am_header.group_id      = group_id;
+    step->am_header.msg.step_idx  = phase->step_index;
+    step->am_header.remote_offset = 0;
+    step->iter_ep                 = 0;
+    step->iter_offset             = 0;
+    step->fragment_pending        = NULL;
+    step->recv_buffer             = (int8_t*)params->recv.buf;
+    step->uct_md                  = phase->md;
+    if (phase->md) {
+        step->uct_iface = (phase->ep_cnt == 1) ? phase->single_ep->iface :
+                                                 phase->multi_eps[0]->iface;
+    } /* Note: we assume all the UCT endpoints have the same interface */
+
+    /* If the previous step involved receiving - plan accordingly  */
+    if ((*flags & UCG_BUILTIN_OP_STEP_FLAG_RECV_AFTER_SEND)   ||
+        (*flags & UCG_BUILTIN_OP_STEP_FLAG_RECV_BEFORE_SEND1) ||
+        (*flags & UCG_BUILTIN_OP_STEP_FLAG_RECV1_BEFORE_SEND)) {
+        step->send_buffer = *current_data_buffer ?
+                *current_data_buffer : (int8_t*)params->send.buf;
+    } else {
+        ucs_assert(*current_data_buffer == NULL);
+        step->send_buffer = (params->send.buf == MPI_IN_PLACE) ?
+                (int8_t*)params->recv.buf : (int8_t*)params->send.buf;
+    }
 
     /* Decide how the messages are sent (regardless of my role) */
     enum ucg_builtin_op_step_flags send_flag;
     ucs_status_t status = ucg_builtin_step_send_flags(step, phase, params, &send_flag);
-    extra_flags |= (send_flag & UCG_BUILTIN_OP_STEP_FLAG_FRAGMENTED);
     if (ucs_unlikely(status != UCS_OK)) {
         return status;
     }
@@ -258,81 +273,76 @@ ucs_status_t ucg_builtin_step_create(ucg_builtin_plan_phase_t *phase,
     switch (phase->method) {
     /* Send-all, Recv-all */
     case UCG_PLAN_METHOD_PAIRWISE:
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_RECV_AFTER_SEND;
+        step->flags = UCG_BUILTIN_OP_STEP_FLAG_RECV_AFTER_SEND;
         /* no break */
 
     /* Send-only */
     case UCG_PLAN_METHOD_SCATTER_TERMINAL:
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_CALC_SENT_BUFFERS;
-        step->calc_cb     = ucg_builtin_calc_scatter;
+        step->flags   = UCG_BUILTIN_OP_STEP_FLAG_CALC_SENT_BUFFERS;
+        step->calc_cb = ucg_builtin_calc_scatter;
         /* no break */
+
     case UCG_PLAN_METHOD_SEND_TERMINAL:
-        step->flags       = send_flag | extra_flags;
+        step->flags = send_flag;
         break;
 
     /* Recv-only */
     case UCG_PLAN_METHOD_RECV_TERMINAL:
     case UCG_PLAN_METHOD_REDUCE_TERMINAL:
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_RECV_AFTER_SEND;
-        step->flags       = extra_flags;
+        step->flags          = UCG_BUILTIN_OP_STEP_FLAG_RECV_AFTER_SEND;
+        *current_data_buffer = (int8_t*)params->recv.buf;
         break;
 
     /* Recv-all, Send-one */
     case UCG_PLAN_METHOD_GATHER_WAYPOINT:
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_CALC_SENT_BUFFERS;
+        step->flags = UCG_BUILTIN_OP_STEP_FLAG_CALC_SENT_BUFFERS;
         /* no break */
     case UCG_PLAN_METHOD_REDUCE_WAYPOINT:
-        if (send_flag & UCG_BUILTIN_OP_STEP_FLAG_FRAGMENTED) {
-            extra_flags  |= UCG_BUILTIN_OP_STEP_FLAG_PIPELINED;
-        }
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_RECV_BEFORE_SEND1;
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_SEND_FROM_RECV_BUF;
-        step->flags       = send_flag | extra_flags;
-        step->recv_buffer = *current_data_buffer =
-                (int8_t*)ucs_calloc(1, step->buffer_length, "ucg_fanin_waypoint_buffer");
-        if (!step->recv_buffer) return UCS_ERR_NO_MEMORY;
+        step->flags         |= UCG_BUILTIN_OP_STEP_FLAG_RECV_BEFORE_SEND1 |
+                               UCG_BUILTIN_OP_STEP_FLAG_TEMP_BUFFER_USED  |
+                               send_flag;
+        step->send_buffer    =
+        step->recv_buffer    =
+        *current_data_buffer =
+                (int8_t*)UCS_ALLOC_CHECK(step->buffer_length,
+                                         "ucg_fanin_waypoint_buffer");
         // TODO: memory registration, and de-registration at some point...
         break;
 
     /* Recv-one, Send-all */
     case UCG_PLAN_METHOD_BCAST_WAYPOINT:
-        if (send_flag & UCG_BUILTIN_OP_STEP_FLAG_FRAGMENTED) {
-            extra_flags  |= UCG_BUILTIN_OP_STEP_FLAG_PIPELINED;
-        }
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_RECV1_BEFORE_SEND;
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_SEND_FROM_RECV_BUF;
-        step->flags       = send_flag | extra_flags;
+        step->send_buffer = step->recv_buffer;
+        step->flags       = UCG_BUILTIN_OP_STEP_FLAG_RECV1_BEFORE_SEND |
+                            send_flag;
         break;
 
     case UCG_PLAN_METHOD_SCATTER_WAYPOINT:
-        if (send_flag & UCG_BUILTIN_OP_STEP_FLAG_FRAGMENTED) {
-            extra_flags  |= UCG_BUILTIN_OP_STEP_FLAG_PIPELINED;
-        }
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_RECV1_BEFORE_SEND;
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_CALC_SENT_BUFFERS;
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_SEND_FROM_RECV_BUF;
-        step->flags       = send_flag | extra_flags;
-        step->recv_buffer = *current_data_buffer =
-                (int8_t*)ucs_calloc(1, step->buffer_length, "ucg_fanout_waypoint_buffer");
-        if (!step->recv_buffer) return UCS_ERR_NO_MEMORY;
+        step->flags = UCG_BUILTIN_OP_STEP_FLAG_RECV1_BEFORE_SEND |
+                      UCG_BUILTIN_OP_STEP_FLAG_CALC_SENT_BUFFERS |
+                      UCG_BUILTIN_OP_STEP_FLAG_TEMP_BUFFER_USED  |
+                      send_flag;
+        step->send_buffer    =
+        step->recv_buffer    =
+        *current_data_buffer =
+                (int8_t*)UCS_ALLOC_CHECK(step->buffer_length,
+                                         "ucg_fanout_waypoint_buffer");
         // TODO: memory registration, and de-registration at some point...
         break;
 
     /* Recursive patterns */
     case UCG_PLAN_METHOD_REDUCE_RECURSIVE:
     case UCG_PLAN_METHOD_NEIGHBOR:
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_RECV_AFTER_SEND;
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_SEND_FROM_RECV_BUF;
-        step->flags       = send_flag | extra_flags;
+        step->send_buffer = step->recv_buffer;
+        step->flags       = UCG_BUILTIN_OP_STEP_FLAG_RECV_AFTER_SEND |
+                            send_flag;
         break;
 
     case UCG_PLAN_METHOD_ALLTOALL_BRUCK:
     case UCG_PLAN_METHOD_ALLGATHER_BRUCK: // TODO: fix for MPI_Allgather()
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_RECV_AFTER_SEND;
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_SEND_FROM_RECV_BUF;
-        extra_flags      |= UCG_BUILTIN_OP_STEP_FLAG_CALC_SENT_BUFFERS;
-        step->flags       = send_flag | extra_flags;
-        step->calc_cb     = ucg_builtin_calc_alltoall;
+        step->flags   = UCG_BUILTIN_OP_STEP_FLAG_RECV_AFTER_SEND |
+                        UCG_BUILTIN_OP_STEP_FLAG_CALC_SENT_BUFFERS |
+                        send_flag;
+        step->calc_cb = ucg_builtin_calc_alltoall;
         break;
     }
 
@@ -340,32 +350,37 @@ ucs_status_t ucg_builtin_step_create(ucg_builtin_plan_phase_t *phase,
     if (phase->ep_cnt == 1) {
         step->flags |= UCG_BUILTIN_OP_STEP_FLAG_SINGLE_ENDPOINT;
     }
-    if (step->flags & send_flag) {
-        step->am_header.remote_offset = 0;
-    }
 
     /* memory registration (using the memory registration cache) */
     if (send_flag & UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_ZCOPY) {
-        ucs_status_t status = ucg_builtin_step_zcopy_prep(step);
+        status = ucg_builtin_step_zcopy_prep(step);
         if (ucs_unlikely(status != UCS_OK)) {
             return status;
         }
     }
 
-    /* Pipelining preparation */
-    if (step->flags & UCG_BUILTIN_OP_STEP_FLAG_PIPELINED) {
+    if (phase->iface_attr->cap.flags & UCT_IFACE_FLAG_INCAST) {
+        step->flags |= UCG_BUILTIN_OP_STEP_FLAG_TL_BATCHED;
+    }
+
+    if (phase->iface_attr->cap.flags & UCT_IFACE_FLAG_INCAST_REDUCABLE) {
+        step->flags |= UCG_BUILTIN_OP_STEP_FLAG_TL_PACK_REDUCIBLE;
+    }
+
+    if (send_flag & UCG_BUILTIN_OP_STEP_FLAG_FRAGMENTED) {
+        step->flags |= UCG_BUILTIN_OP_STEP_FLAG_FRAGMENTED;
         step->fragment_pending = (uint8_t*)UCS_ALLOC_CHECK(sizeof(phase->ep_cnt),
                                                            "ucg_builtin_step_pipelining");
     }
 
+    if (*flags & UCG_BUILTIN_OP_STEP_FLAG_LAST_STEP) {
+        step->flags |= UCG_BUILTIN_OP_STEP_FLAG_LAST_STEP;
+    }
+    *flags = step->flags;
+
     /* Select the right completion callback */
     return ucg_builtin_step_select_callbacks(phase, &step->recv_cb, step->flags,
-#ifdef HAVE_UCP_EXTENSIONS
-            phase->ep_attr->cap.align_incast,
-#else
-            0,
-#endif
-            params->send.count > 0);
+                                             params->send.count > 0);
 }
 
 ucs_status_t ucg_builtin_op_create(ucg_plan_t *plan,
@@ -400,25 +415,23 @@ ucs_status_t ucg_builtin_op_create(ucg_plan_t *plan,
     }
 
     /* Create a step in the op for each phase in the topology */
+    enum ucg_builtin_op_step_flags flags = 0;
     if (phase_count == 1) {
         /* The only step in the plan */
-        status = ucg_builtin_step_create(next_phase,
-                UCG_BUILTIN_OP_STEP_FLAG_FIRST_STEP |
-                UCG_BUILTIN_OP_STEP_FLAG_LAST_STEP,
-                am_id, plan->group_id, params,
-                &current_data_buffer, next_step);
+        flags = UCG_BUILTIN_OP_STEP_FLAG_LAST_STEP;
+        status = ucg_builtin_step_create(next_phase, &flags, am_id,
+                plan->group_id, params, &current_data_buffer, next_step);
     } else {
         /* First step of many */
-        status = ucg_builtin_step_create(next_phase,
-                UCG_BUILTIN_OP_STEP_FLAG_FIRST_STEP, am_id, plan->group_id,
-                params, &current_data_buffer, next_step);
+        status = ucg_builtin_step_create(next_phase, &flags, am_id,
+                plan->group_id, params, &current_data_buffer, next_step);
         if (ucs_unlikely(status != UCS_OK)) {
             goto op_cleanup;
         }
 
         ucg_step_idx_t step_cnt;
         for (step_cnt = 1; step_cnt < phase_count - 1; step_cnt++) {
-            status = ucg_builtin_step_create(++next_phase, 0, am_id,
+            status = ucg_builtin_step_create(++next_phase, &flags, am_id,
                     plan->group_id, params, &current_data_buffer, ++next_step);
             if (ucs_unlikely(status != UCS_OK)) {
                 goto op_cleanup;
@@ -426,9 +439,9 @@ ucs_status_t ucg_builtin_op_create(ucg_plan_t *plan,
         }
 
         /* Last step gets a special flag */
-        status = ucg_builtin_step_create(++next_phase,
-                UCG_BUILTIN_OP_STEP_FLAG_LAST_STEP, am_id, plan->group_id,
-                params, &current_data_buffer, ++next_step);
+        flags |= UCG_BUILTIN_OP_STEP_FLAG_LAST_STEP;
+        status = ucg_builtin_step_create(++next_phase, &flags, am_id,
+                plan->group_id, params, &current_data_buffer, ++next_step);
     }
     if (ucs_unlikely(status != UCS_OK)) {
         goto op_cleanup;
@@ -461,6 +474,10 @@ void ucg_builtin_op_discard(ucg_op_t *op)
         if (step->flags & UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_ZCOPY) {
             uct_md_mem_dereg(step->uct_md, step->zcopy.memh);
             ucs_free(step->zcopy.zcomp);
+        }
+
+        if (step->flags & UCG_BUILTIN_OP_STEP_FLAG_TEMP_BUFFER_USED) {
+            ucs_free(step->recv_buffer);
         }
 
         if (step->flags & UCG_BUILTIN_OP_STEP_FLAG_PIPELINED) {

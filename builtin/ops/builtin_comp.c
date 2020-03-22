@@ -15,7 +15,7 @@
  * handled otherwise (using intermediate buffers).
  */
 
-mpi_reduce_f ucg_builtin_mpi_reduce_cb;
+mpi_reduce_f ucg_builtin_mpi_reduce_cb = NULL;
 static void UCS_F_ALWAYS_INLINE
 ucg_builtin_mpi_reduce(void *mpi_op, void *src, void *dst,
         unsigned dcount, void* mpi_datatype)
@@ -26,11 +26,10 @@ ucg_builtin_mpi_reduce(void *mpi_op, void *src, void *dst,
 
 #define ucg_builtin_mpi_reduce_req(_req, _offset, _data, _length, _params) \
 { \
-    ucg_collective_params_t *params = _params; \
-    ucs_assert(length == (params->recv.count * params->recv.dt_len)); \
-    ucg_builtin_mpi_reduce(params->recv.op_ext,  _data, \
+    ucg_builtin_mpi_reduce((_params)->recv.op_ext, (_data), \
                            (_req)->step->recv_buffer + offset, \
-                           params->recv.count, params->recv.dt_ext); \
+                           (_length) / (_params)->recv.dt_len, \
+                           (_params)->recv.dt_ext); \
 }
 
 static void UCS_F_ALWAYS_INLINE ucg_builtin_memcpy(void *src, void *dst, size_t length)
@@ -38,14 +37,40 @@ static void UCS_F_ALWAYS_INLINE ucg_builtin_memcpy(void *src, void *dst, size_t 
     UCS_PROFILE_CALL_VOID(memcpy, (char*)src, (char*)dst, length);
 }
 
-#define UCG_IF_PENDING_REACHED(req, num) \
-    ucs_assert(req->pending > (num)); if (--req->pending == (num))
+#define UCG_IF_PENDING_REACHED(req, num, dec) \
+    ucs_assert(req->pending > (num)); \
+    req->pending -= dec; \
+    if (ucs_likely(req->pending == (num)))
+    /* note: not really likely, but we optimize for the positive case */
 
 int static UCS_F_ALWAYS_INLINE
 ucg_builtin_comp_step_check_cb(ucg_builtin_request_t *req)
 {
-    UCG_IF_PENDING_REACHED(req, 0) {
+    UCG_IF_PENDING_REACHED(req, 0, 1) {
         (void) ucg_builtin_comp_step_cb(req, NULL);
+        return 1;
+    }
+
+    return 0;
+}
+
+int static UCS_F_ALWAYS_INLINE
+ucg_builtin_comp_step_check_many_cb(ucg_builtin_request_t *req, uint32_t many)
+{
+    UCG_IF_PENDING_REACHED(req, 0, many) {
+        (void) ucg_builtin_comp_step_cb(req, NULL);
+        return 1;
+    }
+
+    return 0;
+}
+
+int static UCS_F_ALWAYS_INLINE
+ucg_builtin_comp_send_check_many_cb(ucg_builtin_request_t *req,
+                                    uint32_t pending, uint32_t many)
+{
+    UCG_IF_PENDING_REACHED(req, pending, many) {
+        (void) ucg_builtin_step_execute(req, NULL);
         return 1;
     }
 
@@ -55,21 +80,20 @@ ucg_builtin_comp_step_check_cb(ucg_builtin_request_t *req)
 int static UCS_F_ALWAYS_INLINE
 ucg_builtin_comp_send_check_cb(ucg_builtin_request_t *req, uint32_t pending)
 {
-    UCG_IF_PENDING_REACHED(req, pending) {
-        (void) ucg_builtin_step_execute(req, NULL);
-        return 1;
-    }
-
-    return 0;
+    return ucg_builtin_comp_send_check_many_cb(req, pending, 1);
 }
 
 int static UCS_F_ALWAYS_INLINE
-ucg_builtin_comp_send_check_frag_cb(ucg_builtin_request_t *req, uint64_t offset)
+ucg_builtin_comp_send_check_frag_many_cb(ucg_builtin_request_t *req,
+                                         uint64_t offset,
+                                         uint8_t count)
 {
     ucg_builtin_op_step_t *step = req->step;
     unsigned frag_idx = offset / step->fragment_length;
-    ucs_assert(step->fragment_pending[frag_idx] > 0);
-    if (--step->fragment_pending[frag_idx] == 0) {
+    ucs_assert(step->fragment_pending[frag_idx] >= count);
+    step->fragment_pending[frag_idx] -= count;
+
+    if (step->fragment_pending[frag_idx] == 0) {
         if (ucs_unlikely(step->iter_offset == UCG_BUILTIN_OFFSET_PIPELINE_PENDING)) {
             step->fragment_pending[frag_idx] = UCG_BUILTIN_FRAG_PENDING;
         } else {
@@ -82,10 +106,15 @@ ucg_builtin_comp_send_check_frag_cb(ucg_builtin_request_t *req, uint64_t offset)
     return step->iter_offset != UCG_BUILTIN_OFFSET_PIPELINE_READY;
 }
 
+int static UCS_F_ALWAYS_INLINE
+ucg_builtin_comp_send_check_frag_cb(ucg_builtin_request_t *req, uint64_t offset)
+{
+    return ucg_builtin_comp_send_check_frag_many_cb(req, offset, 1);
+}
+
 static int ucg_builtin_comp_recv_one_cb(ucg_builtin_request_t *req,
         uint64_t offset, void *data, size_t length)
 {
-    ucs_assert(offset == 0);
     ucg_builtin_memcpy(req->step->recv_buffer, data, length);
     (void) ucg_builtin_comp_step_cb(req, NULL);
     return 1;
@@ -94,7 +123,6 @@ static int ucg_builtin_comp_recv_one_cb(ucg_builtin_request_t *req,
 static int ucg_builtin_comp_recv_one_then_send_cb(ucg_builtin_request_t *req,
         uint64_t offset, void *data, size_t length)
 {
-    ucs_assert(offset == 0);
     ucg_builtin_memcpy(req->step->recv_buffer, data, length);
     (void) ucg_builtin_step_execute(req, NULL);
     return 1;
@@ -103,8 +131,6 @@ static int ucg_builtin_comp_recv_one_then_send_cb(ucg_builtin_request_t *req,
 static int ucg_builtin_comp_barrier_recv_one_then_send_cb(ucg_builtin_request_t *req,
         uint64_t offset, void *data, size_t length)
 {
-    ucs_assert(offset == 0);
-    ucs_assert(length == 0);
     ucg_collective_release_barrier(req->op->super.plan->group);
     (void) ucg_builtin_step_execute(req, NULL);
     return 1;
@@ -157,8 +183,6 @@ static int ucg_builtin_comp_recv_many_then_send1_non_zcopy_cb(ucg_builtin_reques
 UCS_PROFILE_FUNC(int, ucg_builtin_comp_reduce_one_cb, (req, offset, data, length),
                  ucg_builtin_request_t *req, uint64_t offset, void *data, size_t length)
 {
-    ucs_assert(offset == 0);
-    ucs_assert(length == req->step->buffer_length);
     ucg_builtin_mpi_reduce_req(req, offset, data, length, &req->op->super.params);
     (void) ucg_builtin_comp_step_cb(req, NULL);
     return 1;
@@ -167,8 +191,6 @@ UCS_PROFILE_FUNC(int, ucg_builtin_comp_reduce_one_cb, (req, offset, data, length
 static int ucg_builtin_comp_reduce_one_then_send_cb(ucg_builtin_request_t *req,
         uint64_t offset, void *data, size_t length)
 {
-    ucs_assert(offset == 0);
-    ucs_assert(length == req->step->buffer_length);
     ucg_builtin_mpi_reduce_req(req, offset, data, length, &req->op->super.params);
     (void) ucg_builtin_step_execute(req, NULL);
     return 1;
@@ -181,25 +203,57 @@ static int ucg_builtin_comp_reduce_many_cb(ucg_builtin_request_t *req,
     return ucg_builtin_comp_step_check_cb(req);
 }
 
-static int ucg_builtin_comp_reduce_padded_many_cb(ucg_builtin_request_t *req,
+static int ucg_builtin_comp_reduce_batched_one_cb(ucg_builtin_request_t *req,
         uint64_t offset, void *data, size_t length)
 {
     unsigned index, count = req->step->batch_cnt;
-    size_t stride = ucs_align_up(length, UCS_SYS_CACHE_LINE_SIZE);
-    data = (void*)ucs_align_up((uintptr_t)data, UCS_SYS_CACHE_LINE_SIZE);
-    for (index = 0; index < count; index++, data = (uint8_t*)data + stride) {
-        ucg_builtin_mpi_reduce_req(req, offset, data, length, &req->op->super.params);
+    unsigned data_size = req->step->buffer_length;
+    length += sizeof(ucg_builtin_header_t); /* restore after the AM handler */
+    for (index = 0; index < count; index++, data = (uint8_t*)data + length) {
+        ucg_builtin_mpi_reduce_req(req, offset, data, data_size, &req->op->super.params);
     }
+
+    (void) ucg_builtin_comp_step_cb(req, NULL);
+    return 1;
+}
+
+static int ucg_builtin_comp_reduce_batched_many_cb(ucg_builtin_request_t *req,
+        uint64_t offset, void *data, size_t length)
+{
+    unsigned index, count = req->step->batch_cnt;
+    unsigned data_size = req->step->buffer_length;
+    length += sizeof(ucg_builtin_header_t); /* restore after the AM handler */
+    for (index = 0; index < count; index++, data = (uint8_t*)data + length) {
+        ucg_builtin_mpi_reduce_req(req, offset, data, data_size, &req->op->super.params);
+    }
+
     return ucg_builtin_comp_step_check_cb(req);
 }
 
-static int ucg_builtin_comp_reduce_packed_many_cb(ucg_builtin_request_t *req,
+static int ucg_builtin_comp_reduce_batched_one_then_send_cb(ucg_builtin_request_t *req,
         uint64_t offset, void *data, size_t length)
 {
     unsigned index, count = req->step->batch_cnt;
+    unsigned data_size = req->step->buffer_length;
+    length += sizeof(ucg_builtin_header_t); /* restore after the AM handler */
     for (index = 0; index < count; index++, data = (uint8_t*)data + length) {
-        ucg_builtin_mpi_reduce_req(req, offset, data, length, &req->op->super.params);
+        ucg_builtin_mpi_reduce_req(req, offset, data, data_size, &req->op->super.params);
     }
+
+    (void) ucg_builtin_step_execute(req, NULL);
+    return 1;
+}
+
+static int ucg_builtin_comp_reduce_batched_many_then_send_cb(ucg_builtin_request_t *req,
+        uint64_t offset, void *data, size_t length)
+{
+    unsigned index, count = req->step->batch_cnt;
+    unsigned data_size = req->step->buffer_length;
+    length += sizeof(ucg_builtin_header_t); /* restore after the AM handler */
+    for (index = 0; index < count; index++, data = (uint8_t*)data + length) {
+        ucg_builtin_mpi_reduce_req(req, offset, data, data_size, &req->op->super.params);
+    }
+
     return ucg_builtin_comp_step_check_cb(req);
 }
 
@@ -210,25 +264,16 @@ static int ucg_builtin_comp_reduce_many_then_send_pipe_cb(ucg_builtin_request_t 
     return ucg_builtin_comp_send_check_frag_cb(req, offset);
 }
 
-static int ucg_builtin_comp_reduce_padded_many_then_send_pipe_cb(ucg_builtin_request_t *req,
+static int ucg_builtin_comp_reduce_batched_many_then_send_pipe_cb(ucg_builtin_request_t *req,
         uint64_t offset, void *data, size_t length)
 {
     unsigned index, count = req->step->batch_cnt;
-    size_t stride = ucs_align_up(length, UCS_SYS_CACHE_LINE_SIZE);
-    data = (void*)ucs_align_up((uintptr_t)data, UCS_SYS_CACHE_LINE_SIZE);
-    for (index = 0; index < count; index++, data = (uint8_t*)data + stride) {
-        ucg_builtin_mpi_reduce_req(req, offset, data, length, &req->op->super.params);
-    }
-    return ucg_builtin_comp_send_check_frag_cb(req, offset);
-}
-
-static int ucg_builtin_comp_reduce_packed_many_then_send_pipe_cb(ucg_builtin_request_t *req,
-        uint64_t offset, void *data, size_t length)
-{
-    unsigned index, count = req->step->batch_cnt;
+    unsigned data_size = req->step->buffer_length;
+    length += sizeof(ucg_builtin_header_t); /* restore after the AM handler */
     for (index = 0; index < count; index++, data = (uint8_t*)data + length) {
-        ucg_builtin_mpi_reduce_req(req, offset, data, length, &req->op->super.params);
+        ucg_builtin_mpi_reduce_req(req, offset, data, data_size, &req->op->super.params);
     }
+
     return ucg_builtin_comp_send_check_frag_cb(req, offset);
 }
 
@@ -239,25 +284,16 @@ static int ucg_builtin_comp_reduce_many_then_send_zcopy_cb(ucg_builtin_request_t
     return ucg_builtin_comp_send_check_cb(req, req->step->fragments);
 }
 
-static int ucg_builtin_comp_reduce_padded_many_then_send_zcopy_cb(ucg_builtin_request_t *req,
+static int ucg_builtin_comp_reduce_batched_many_then_send_zcopy_cb(ucg_builtin_request_t *req,
         uint64_t offset, void *data, size_t length)
 {
     unsigned index, count = req->step->batch_cnt;
-    size_t stride = ucs_align_up(length, UCS_SYS_CACHE_LINE_SIZE);
-    data = (void*)ucs_align_up((uintptr_t)data, UCS_SYS_CACHE_LINE_SIZE);
-    for (index = 0; index < count; index++, data = (uint8_t*)data + stride) {
-        ucg_builtin_mpi_reduce_req(req, offset, data, length, &req->op->super.params);
-    }
-    return ucg_builtin_comp_send_check_cb(req, req->step->fragments);
-}
-
-static int ucg_builtin_comp_reduce_packed_many_then_send_zcopy_cb(ucg_builtin_request_t *req,
-        uint64_t offset, void *data, size_t length)
-{
-    unsigned index, count = req->step->batch_cnt;
+    unsigned data_size = req->step->buffer_length;
+    length += sizeof(ucg_builtin_header_t); /* restore after the AM handler */
     for (index = 0; index < count; index++, data = (uint8_t*)data + length) {
-        ucg_builtin_mpi_reduce_req(req, offset, data, length, &req->op->super.params);
+        ucg_builtin_mpi_reduce_req(req, offset, data, data_size, &req->op->super.params);
     }
+
     return ucg_builtin_comp_send_check_cb(req, req->step->fragments);
 }
 
@@ -268,33 +304,22 @@ static int ucg_builtin_comp_reduce_many_then_send_non_zcopy_cb(ucg_builtin_reque
     return ucg_builtin_comp_send_check_cb(req, 0);
 }
 
-static int ucg_builtin_comp_reduce_padded_many_then_send_non_zcopy_cb(ucg_builtin_request_t *req,
+static int ucg_builtin_comp_reduce_batched_many_then_send_non_zcopy_cb(ucg_builtin_request_t *req,
         uint64_t offset, void *data, size_t length)
 {
     unsigned index, count = req->step->batch_cnt;
-    size_t stride = ucs_align_up(length, UCS_SYS_CACHE_LINE_SIZE);
-    data = (void*)ucs_align_up((uintptr_t)data, UCS_SYS_CACHE_LINE_SIZE);
-    for (index = 0; index < count; index++, data = (uint8_t*)data + stride) {
-        ucg_builtin_mpi_reduce_req(req, offset, data, length, &req->op->super.params);
-    }
-    return ucg_builtin_comp_send_check_cb(req, 0);
-}
-
-static int ucg_builtin_comp_reduce_packed_many_then_send_non_zcopy_cb(ucg_builtin_request_t *req,
-        uint64_t offset, void *data, size_t length)
-{
-    unsigned index, count = req->step->batch_cnt;
+    unsigned data_size = req->step->buffer_length;
+    length += sizeof(ucg_builtin_header_t); /* restore after the AM handler */
     for (index = 0; index < count; index++, data = (uint8_t*)data + length) {
-        ucg_builtin_mpi_reduce_req(req, offset, data, length, &req->op->super.params);
+        ucg_builtin_mpi_reduce_req(req, offset, data, data_size, &req->op->super.params);
     }
+
     return ucg_builtin_comp_send_check_cb(req, 0);
 }
 
 static int ucg_builtin_comp_wait_one_cb(ucg_builtin_request_t *req,
         uint64_t offset, void *data, size_t length)
 {
-    ucs_assert(offset == 0);
-    ucs_assert(length == 0);
     (void) ucg_builtin_comp_step_cb(req, NULL);
     return 1;
 }
@@ -302,8 +327,6 @@ static int ucg_builtin_comp_wait_one_cb(ucg_builtin_request_t *req,
 static int ucg_builtin_comp_wait_one_then_send_cb(ucg_builtin_request_t *req,
         uint64_t offset, void *data, size_t length)
 {
-    ucs_assert(offset == 0);
-    ucs_assert(length == 0);
     (void) ucg_builtin_step_execute(req, NULL);
     return 1;
 }
@@ -311,24 +334,31 @@ static int ucg_builtin_comp_wait_one_then_send_cb(ucg_builtin_request_t *req,
 static int ucg_builtin_comp_wait_many_cb(ucg_builtin_request_t *req,
         uint64_t offset, void *data, size_t length)
 {
-    ucs_assert(offset == 0);
-    ucs_assert(length == 0);
     return ucg_builtin_comp_step_check_cb(req);
 }
 
 static int ucg_builtin_comp_wait_many_then_send_cb(ucg_builtin_request_t *req,
         uint64_t offset, void *data, size_t length)
 {
-    ucs_assert(offset == 0);
-    ucs_assert(length == 0);
     return ucg_builtin_comp_send_check_cb(req, 1);
+}
+
+static int ucg_builtin_comp_wait_batched_one_then_send_cb(ucg_builtin_request_t *req,
+        uint64_t offset, void *data, size_t length)
+{
+    (void) ucg_builtin_step_execute(req, NULL);
+    return 1;
+}
+
+static int ucg_builtin_comp_wait_batched_many_then_send_cb(ucg_builtin_request_t *req,
+        uint64_t offset, void *data, size_t length)
+{
+    return ucg_builtin_comp_send_check_cb(req, req->step->batch_cnt);
 }
 
 static int ucg_builtin_comp_barrier_one_cb(ucg_builtin_request_t *req,
         uint64_t offset, void *data, size_t length)
 {
-    ucs_assert(offset == 0);
-    ucs_assert(length == 0);
     (void) ucg_builtin_comp_step_cb(req, NULL);
     ucg_collective_release_barrier(req->op->super.plan->group);
     return 1;
@@ -337,9 +367,7 @@ static int ucg_builtin_comp_barrier_one_cb(ucg_builtin_request_t *req,
 static inline int ucg_builtin_comp_barrier_many_cb(ucg_builtin_request_t *req,
         uint64_t offset, void *data, size_t length)
 {
-    ucs_assert(offset == 0);
-    ucs_assert(length == 0);
-    UCG_IF_PENDING_REACHED(req, 0) {
+    UCG_IF_PENDING_REACHED(req, 0, 1) {
         (void) ucg_builtin_comp_step_cb(req, NULL);
         ucg_collective_release_barrier(req->op->super.plan->group);
         return 1;
@@ -347,29 +375,16 @@ static inline int ucg_builtin_comp_barrier_many_cb(ucg_builtin_request_t *req,
     return 0;
 }
 
-static int ucg_builtin_comp_barrier_padded_many_cb(ucg_builtin_request_t *req,
-        uint64_t offset, void *data, size_t length)
-{
-    req->pending -= req->step->batch_cnt;
-    return ucg_builtin_comp_barrier_many_cb(req, offset, data, length);
-}
-
-static int ucg_builtin_comp_barrier_packed_many_cb(ucg_builtin_request_t *req,
-        uint64_t offset, void *data, size_t length)
-{
-    req->pending -= req->step->batch_cnt;
-    return ucg_builtin_comp_barrier_many_cb(req, offset, data, length);
-}
-
 ucs_status_t ucg_builtin_step_select_callbacks(ucg_builtin_plan_phase_t *phase,
-        ucg_builtin_comp_recv_cb_t *recv_cb, int flags, size_t align_incast,
-        int nonzero_length)
+        ucg_builtin_comp_recv_cb_t *recv_cb, int flags, int nonzero_length)
 {
-    int is_pipelined  = flags & UCG_BUILTIN_OP_STEP_FLAG_PIPELINED;
-    int is_fragmented = flags & UCG_BUILTIN_OP_STEP_FLAG_FRAGMENTED;
-    int is_single_ep  = flags & UCG_BUILTIN_OP_STEP_FLAG_SINGLE_ENDPOINT;
     int is_last_step  = flags & UCG_BUILTIN_OP_STEP_FLAG_LAST_STEP;
+    int is_single_ep  = flags & UCG_BUILTIN_OP_STEP_FLAG_SINGLE_ENDPOINT;
     int is_zcopy      = flags & UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_ZCOPY;
+    int is_fragmented = flags & UCG_BUILTIN_OP_STEP_FLAG_FRAGMENTED;
+    int is_pipelined  = flags & UCG_BUILTIN_OP_STEP_FLAG_PIPELINED;
+    int is_batched    = ((flags & UCG_BUILTIN_OP_STEP_FLAG_TL_BATCHED) &&
+                        !(flags & UCG_BUILTIN_OP_STEP_FLAG_TL_PACK_REDUCIBLE));
     int is_single_msg = ((is_single_ep) && (!is_fragmented));
 
     switch (phase->method) {
@@ -424,55 +439,36 @@ ucs_status_t ucg_builtin_step_select_callbacks(ucg_builtin_plan_phase_t *phase,
     case UCG_PLAN_METHOD_REDUCE_WAYPOINT:
         is_single_msg |= ((phase->ep_cnt == 2) && (!is_fragmented));
         if (is_single_msg) {
-            *recv_cb = nonzero_length ? ucg_builtin_comp_reduce_one_then_send_cb :
-                                        ucg_builtin_comp_wait_one_then_send_cb;
+            if (is_batched) {
+                if (is_fragmented) {
+                    *recv_cb = ucg_builtin_comp_reduce_batched_many_then_send_cb;
+                } else {
+                    *recv_cb = nonzero_length ?
+                            ucg_builtin_comp_reduce_batched_one_then_send_cb :
+                            ucg_builtin_comp_wait_batched_one_then_send_cb;
+                }
+            } else {
+                *recv_cb = nonzero_length ?
+                        ucg_builtin_comp_reduce_one_then_send_cb :
+                        ucg_builtin_comp_wait_one_then_send_cb;
+            }
         } else if (!nonzero_length) {
-            *recv_cb = ucg_builtin_comp_wait_many_then_send_cb;
+            *recv_cb = is_batched ?
+                    ucg_builtin_comp_wait_batched_many_then_send_cb :
+                    ucg_builtin_comp_wait_many_then_send_cb;
+
         } else if (is_pipelined) {
-            switch (align_incast) {
-            case NO_INCAST_SUPPORT:
-                *recv_cb = ucg_builtin_comp_reduce_many_then_send_pipe_cb;
-                break;
-            case UCS_SYS_CACHE_LINE_SIZE:
-                *recv_cb = ucg_builtin_comp_reduce_padded_many_then_send_pipe_cb;
-                break;
-            case 0:
-                *recv_cb = ucg_builtin_comp_reduce_packed_many_then_send_pipe_cb;
-                break;
-            default:
-                ucs_error("Interface with an unsupported element alignment");
-                return UCS_ERR_UNSUPPORTED;
-            }
+            *recv_cb = is_batched ?
+                    ucg_builtin_comp_reduce_batched_many_then_send_pipe_cb :
+                    ucg_builtin_comp_reduce_many_then_send_pipe_cb;
         } else if (is_zcopy) {
-            switch (align_incast) {
-            case NO_INCAST_SUPPORT:
-                *recv_cb = ucg_builtin_comp_reduce_many_then_send_zcopy_cb;
-                break;
-            case UCS_SYS_CACHE_LINE_SIZE:
-                *recv_cb = ucg_builtin_comp_reduce_padded_many_then_send_zcopy_cb;
-                break;
-            case 0:
-                *recv_cb = ucg_builtin_comp_reduce_packed_many_then_send_zcopy_cb;
-                break;
-            default:
-                ucs_error("Interface with an unsupported element alignment");
-                return UCS_ERR_UNSUPPORTED;
-            }
+            *recv_cb = is_batched ?
+                    ucg_builtin_comp_reduce_batched_many_then_send_zcopy_cb :
+                    ucg_builtin_comp_reduce_many_then_send_zcopy_cb;
         } else {
-            switch (align_incast) {
-            case NO_INCAST_SUPPORT:
-                *recv_cb = ucg_builtin_comp_reduce_many_then_send_non_zcopy_cb;
-                break;
-            case UCS_SYS_CACHE_LINE_SIZE:
-                *recv_cb = ucg_builtin_comp_reduce_padded_many_then_send_non_zcopy_cb;
-                break;
-            case 0:
-                *recv_cb = ucg_builtin_comp_reduce_packed_many_then_send_non_zcopy_cb;
-                break;
-            default:
-                ucs_error("Interface with an unsupported element alignment");
-                return UCS_ERR_UNSUPPORTED;
-            }
+            *recv_cb = is_batched ?
+                    ucg_builtin_comp_reduce_batched_many_then_send_non_zcopy_cb:
+                    ucg_builtin_comp_reduce_many_then_send_non_zcopy_cb;
         }
         break;
 
@@ -483,34 +479,20 @@ ucs_status_t ucg_builtin_step_select_callbacks(ucg_builtin_plan_phase_t *phase,
          * actually by the time the FAININ ended - the barrier can be
          * released (since everyone has arrived).
          */
-        switch (align_incast) {
-        case NO_INCAST_SUPPORT:
+        if (is_batched) {
+            if (is_fragmented) {
+                *recv_cb = ucg_builtin_comp_reduce_batched_many_cb;
+            } else {
+                *recv_cb = nonzero_length ?
+                        ucg_builtin_comp_reduce_batched_one_cb :
+                        ucg_builtin_comp_barrier_one_cb;
+            }
+        } else {
             *recv_cb = nonzero_length ?
                     (is_single_msg ? ucg_builtin_comp_reduce_one_cb :
                                      ucg_builtin_comp_reduce_many_cb) :
                     (is_single_msg ? ucg_builtin_comp_barrier_one_cb :
                                      ucg_builtin_comp_barrier_many_cb);
-            break;
-
-        case UCS_SYS_CACHE_LINE_SIZE:
-            *recv_cb = nonzero_length ?
-                    (is_single_msg ? ucg_builtin_comp_reduce_one_cb :
-                                     ucg_builtin_comp_reduce_padded_many_cb) :
-                    (is_single_msg ? ucg_builtin_comp_barrier_one_cb :
-                                     ucg_builtin_comp_barrier_padded_many_cb);
-            break;
-
-        case 0:
-            *recv_cb = nonzero_length ?
-                    (is_single_msg ? ucg_builtin_comp_reduce_one_cb :
-                                     ucg_builtin_comp_reduce_packed_many_cb) :
-                    (is_single_msg ? ucg_builtin_comp_barrier_one_cb :
-                                     ucg_builtin_comp_barrier_packed_many_cb);
-            break;
-
-        default:
-            ucs_error("Interface with an unsupported element alignment");
-            return UCS_ERR_UNSUPPORTED;
         }
         break;
 
@@ -531,10 +513,12 @@ ucs_status_t ucg_builtin_step_select_callbacks(ucg_builtin_plan_phase_t *phase,
         }
         break;
 
+    default:
         *recv_cb = ucg_builtin_comp_recv_one_cb;
         break;
     }
 
+    // TODO: if (is_last_step) - set different callbacks that consider this...
     return UCS_OK;
 }
 
@@ -570,9 +554,7 @@ ucs_status_t ucg_builtin_step_zcopy_prep(ucg_builtin_op_step_t *step)
     }
 
     /* Register the buffer, creating a memory handle used in zero-copy sends */
-    int8_t *sbuf = (step->flags & UCG_BUILTIN_OP_STEP_FLAG_SEND_FROM_RECV_BUF) ?
-            step->recv_buffer : step->send_buffer;
-    ucs_status_t status = uct_md_mem_reg(step->uct_md, sbuf,
+    ucs_status_t status = uct_md_mem_reg(step->uct_md, step->send_buffer,
             step->buffer_length, UCT_MD_MEM_ACCESS_ALL, &step->zcopy.memh);
     if (status != UCS_OK) {
         ucs_free(zcomp);
@@ -657,77 +639,32 @@ ucs_status_t ucg_builtin_op_consider_optimization(ucg_builtin_op_t *op,
     return UCS_OK;
 }
 
-#ifdef TODO
-static inline void reduce_atomic_for_packet(void *dst, const void *src, size_t len)
-{
-    size_t length_iter;
-    switch (len) {
-    case sizeof(uint8_t):
-        /* Atomic addition - 8 bits */
-        ucs_atomic_add8(dst, src);
-    break;
-
-    case sizeof(uint16_t):
-        /* Atomic addition - 16 bits */
-        ucs_atomic_add16(dst, src);
-    break;
-
-    case sizeof(uint32_t):
-        /* Atomic addition - 32 bits */
-        ucs_atomic_add32(dst, src);
-    break;
-
-    default:
-        /* Atomic addition - multiples of 64 bits */
-        ucs_assert(len % sizeof(uint64_t) == 0);
-        for (length_iter = len; length_iter > 0; len -= sizeof(uint64_t)) {
-            ucs_atomic_add64(dst, src);
-            dst += sizeof(uint64_t);
-            src += sizeof(uint64_t);
-        }
-    }
-}
-
 int ucg_builtin_atomic_reduce_full(ucg_builtin_request_t *req,
-        uint64_t offset, void *data, size_t length, ucs_spinlock_t *lock)
-{
-
-    if (ucs_unlikely(req->op->super.params->recv.op_ext == MPI_ADD)) {
-        reduce_atomic_for_packet();
-        return;
-    }
-#else
-int ucg_builtin_atomic_reduce_full(ucg_builtin_request_t *req,
-        uint64_t offset, void *src, void *dst, size_t length, ucs_spinlock_t *lock)
-{
-#endif
-    ucg_collective_params_t *params = &req->op->super.params;
-    ucs_assert(lock != NULL);
-
-    ucs_spin_lock(lock);
-    ucg_builtin_mpi_reduce(params->recv.op_ext, src, dst, params->send.count,
-            params->send.dt_ext);
-    ucs_spin_unlock(lock);
-
-    return length; // TODO: make ucg_builtin_mpi_reduce return the actual size
-}
-
-int ucg_builtin_atomic_reduce_part(ucg_builtin_request_t *req,
-        uint64_t offset, void *src, void *dst, size_t length, ucs_spinlock_t *lock)
+        void *src, void *dst, size_t length)
 {
     ucg_collective_params_t *params = &req->op->super.params;
-    ucs_assert(lock != NULL);
+    ucs_assert(length == (params->send.dt_len * params->send.count));
 
     /* Check for barriers */
     if (ucs_unlikely(params->send.dt_len == 0)) {
         return 0;
     }
 
-    ucs_spin_lock(lock);
-    ucg_builtin_mpi_reduce(params->recv.op_ext, src, dst,
-            length / params->send.dt_len, params->send.dt_ext);
-    ucs_spin_unlock(lock);
+    ucg_builtin_mpi_reduce(params->send.op_ext, src, dst, params->send.count,
+            params->send.dt_ext);
+    return length; // TODO: make ucg_builtin_mpi_reduce return the actual size
+}
 
+int ucg_builtin_atomic_reduce_part(ucg_builtin_request_t *req,
+        void *src, void *dst, size_t length)
+{
+    ucg_collective_params_t *params = &req->op->super.params;
+    ucs_assert(length / params->send.dt_len < params->send.count);
+    ucs_assert(length % params->send.dt_len == 0);
+
+
+    ucg_builtin_mpi_reduce(params->send.op_ext, src, dst,
+            length / params->send.dt_len, params->send.dt_ext);
     return length;
 }
 

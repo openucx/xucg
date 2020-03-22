@@ -6,9 +6,21 @@
 #ifndef UCG_BUILTIN_OPS_H_
 #define UCG_BUILTIN_OPS_H_
 
+#ifdef HAVE_CONFIG_H
+#  include "config.h"
+#endif
+
 #include "../plan/builtin_plan.h"
 #include <ucp/core/ucp_request.h>
 #include <ucs/datastruct/ptr_array.h>
+
+#ifdef HAVE_UCP_EXTENSIONS
+#define UCS_ALLOC_CHECK(size, name) ({ \
+    void* ptr = ucs_malloc(size, name); \
+    if (ptr == 0) return UCS_ERR_NO_MEMORY; \
+    ptr; \
+})
+#endif
 
 BEGIN_C_DECLS
 
@@ -59,23 +71,28 @@ typedef union ucg_builtin_header {
  */
 enum ucg_builtin_op_step_flags {
     /* General characteristics */
-    UCG_BUILTIN_OP_STEP_FLAG_RECV_AFTER_SEND    = UCS_BIT(0),
-    UCG_BUILTIN_OP_STEP_FLAG_RECV_BEFORE_SEND1  = UCS_BIT(1),
-    UCG_BUILTIN_OP_STEP_FLAG_RECV1_BEFORE_SEND  = UCS_BIT(2),
+    UCG_BUILTIN_OP_STEP_FLAG_LAST_STEP          = UCS_BIT(0),
+    UCG_BUILTIN_OP_STEP_FLAG_SINGLE_ENDPOINT    = UCS_BIT(1),
+    UCG_BUILTIN_OP_STEP_FLAG_CALC_SENT_BUFFERS  = UCS_BIT(2),
+    UCG_BUILTIN_OP_STEP_FLAG_PIPELINED          = UCS_BIT(3),
 
-    UCG_BUILTIN_OP_STEP_FLAG_FIRST_STEP         = UCS_BIT(3),
-    UCG_BUILTIN_OP_STEP_FLAG_LAST_STEP          = UCS_BIT(4),
-    UCG_BUILTIN_OP_STEP_FLAG_SINGLE_ENDPOINT    = UCS_BIT(5),
-    UCG_BUILTIN_OP_STEP_FLAG_CALC_SENT_BUFFERS  = UCS_BIT(6),
-    UCG_BUILTIN_OP_STEP_FLAG_FRAGMENTED         = UCS_BIT(7),
-    UCG_BUILTIN_OP_STEP_FLAG_PIPELINED          = UCS_BIT(8),
-    UCG_BUILTIN_OP_STEP_FLAG_LOCKED_PACK_CB     = UCS_BIT(9),
-    UCG_BUILTIN_OP_STEP_FLAG_SEND_FROM_RECV_BUF = UCS_BIT(10),
+    /* Alternative Methods for using the list of endpoints */
+    UCG_BUILTIN_OP_STEP_FLAG_RECV_AFTER_SEND    = UCS_BIT(4),
+    UCG_BUILTIN_OP_STEP_FLAG_RECV_BEFORE_SEND1  = UCS_BIT(5),
+    UCG_BUILTIN_OP_STEP_FLAG_RECV1_BEFORE_SEND  = UCS_BIT(6),
 
-    /* Send types */
-    UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_SHORT      = UCS_BIT(11),
-    UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_BCOPY      = UCS_BIT(12),
-    UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_ZCOPY      = UCS_BIT(13),
+    /* Alternative Send types */
+    UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_SHORT      = UCS_BIT(7),
+    UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_BCOPY      = UCS_BIT(8),
+    UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_ZCOPY      = UCS_BIT(9),
+    UCG_BUILTIN_OP_STEP_FLAG_FRAGMENTED         = UCS_BIT(10),
+
+    UCG_BUILTIN_OP_STEP_FLAG_SWITCH_MASK        = UCS_MASK(11),
+
+    /* Additional step information */
+    UCG_BUILTIN_OP_STEP_FLAG_TL_BATCHED         = UCS_BIT(11),
+    UCG_BUILTIN_OP_STEP_FLAG_TL_PACK_REDUCIBLE  = UCS_BIT(12),
+    UCG_BUILTIN_OP_STEP_FLAG_TEMP_BUFFER_USED   = UCS_BIT(13)
 };
 
 /* Definitions of several callback functions, used during an operation */
@@ -165,7 +182,7 @@ struct ucg_builtin_request {
 };
 
 ucs_status_t ucg_builtin_step_create (ucg_builtin_plan_phase_t *phase,
-                                      unsigned extra_flags,
+                                      enum ucg_builtin_op_step_flags *flags,
                                       unsigned base_am_id,
                                       ucg_group_id_t group_id,
                                       const ucg_collective_params_t *params,
@@ -173,11 +190,9 @@ ucs_status_t ucg_builtin_step_create (ucg_builtin_plan_phase_t *phase,
                                       ucg_builtin_op_step_t *step);
 ucs_status_t ucg_builtin_step_execute(ucg_builtin_request_t *req,
                                       ucg_request_t **user_req);
-#define NO_INCAST_SUPPORT ((size_t)-1)
 ucs_status_t ucg_builtin_step_select_callbacks(ucg_builtin_plan_phase_t *phase,
                                                ucg_builtin_comp_recv_cb_t *recv_cb,
-                                               int flags, size_t align_incast,
-                                               int nonzero_length);
+                                               int flags, int nonzero_length);
 ucs_status_t ucg_builtin_op_select_callback(ucg_builtin_plan_t *plan,
                                             ucg_builtin_op_init_cb_t *init_cb);
 ucs_status_t ucg_builtin_step_zcopy_prep(ucg_builtin_op_step_t *step);
@@ -192,36 +207,26 @@ ucs_status_t ucg_builtin_op_trigger(ucg_op_t *op,
                                     ucg_coll_id_t coll_id,
                                     ucg_request_t **request);
 
+void ucg_builtin_print_flags(ucg_builtin_op_step_t *step);
+
 /*
  * Macros to generate the headers of all bcopy packing callback functions.
  */
-typedef ssize_t (*packed_send_t)(uct_ep_h, uint8_t, uct_pack_locked_callback_t, void*, unsigned);
+typedef ssize_t (*packed_send_t)(uct_ep_h, uint8_t, uct_pack_callback_t, void*, unsigned);
 
-#define UCG_BUILTIN_PACKER_NAME(_modifier, _mode, _buffer) \
-    ucg_builtin_step_am_bcopy_pack ## _modifier ## _mode ## _buffer
+#define UCG_BUILTIN_PACKER_NAME(_modifier, _mode) \
+    ucg_builtin_step_am_bcopy_pack ## _modifier ## _mode
 
-#ifdef HAVE_UCP_EXTENSIONS
-#define UCG_BUILTIN_PACKER_DECLARE(_modifier, _mode, _buffer) \
-    size_t UCG_BUILTIN_PACKER_NAME(_modifier, _mode, _buffer) \
-        (void *dest, ucs_spinlock_t *lock, void *arg)
-#else
-#define UCG_BUILTIN_PACKER_DECLARE(_modifier, _mode, _buffer) \
-    size_t UCG_BUILTIN_PACKER_NAME(_modifier, _mode, _buffer) \
-        (void *dest, void *arg)
-#endif
-
-#define UCG_BUILTIN_PACKER_DECLARE_BY_BUFFER(_modifier, _mode) \
-        UCG_BUILTIN_PACKER_DECLARE(_modifier, _mode, _sbuf); \
-        UCG_BUILTIN_PACKER_DECLARE(_modifier, _mode, _rbuf);
+#define UCG_BUILTIN_PACKER_DECLARE(_modifier, _mode) \
+    size_t UCG_BUILTIN_PACKER_NAME(_modifier, _mode) (void *dest, void *arg)
 
 #define UCG_BUILTIN_PACKER_DECLARE_BY_MODE(_modifier) \
-        UCG_BUILTIN_PACKER_DECLARE_BY_BUFFER(_modifier, _single) \
-        UCG_BUILTIN_PACKER_DECLARE_BY_BUFFER(_modifier, _full) \
-        UCG_BUILTIN_PACKER_DECLARE_BY_BUFFER(_modifier, _part)
+        UCG_BUILTIN_PACKER_DECLARE(_modifier, single); \
+        UCG_BUILTIN_PACKER_DECLARE(_modifier, full); \
+        UCG_BUILTIN_PACKER_DECLARE(_modifier, part);
 
 UCG_BUILTIN_PACKER_DECLARE_BY_MODE(_)
-UCG_BUILTIN_PACKER_DECLARE_BY_MODE(_locked)
-UCG_BUILTIN_PACKER_DECLARE_BY_MODE(_batched)
+UCG_BUILTIN_PACKER_DECLARE_BY_MODE(_reducing_)
 
 /*
  * Incoming messages are processed for one of the collective operations

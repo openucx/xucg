@@ -13,6 +13,7 @@
 #include <ucs/datastruct/khash.h>
 
 #define UCG_GROUP_MAX_IFACES (8)
+#define UCG_GROUP_FIRST_ID   (1)
 
 extern size_t ucg_ctx_worker_offset;
 #define UCG_WORKER_TO_GROUPS_CTX(worker) \
@@ -31,7 +32,7 @@ typedef struct ucg_groups {
     ucs_list_link_t       groups_head;
     ucg_group_id_t        next_id;
 
-#ifdef UCT_COLLECTIVES
+#ifdef HAVE_UCT_COLLECTIVES
     uint32_t              num_local_peers;
     uint32_t              my_local_peer_idx;
 #endif

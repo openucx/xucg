@@ -11,6 +11,30 @@
 #include <stddef.h>
 #include <stdint.h>
 
+
+/**
+ * @ingroup UCG_CONTEXT
+ * @brief UCG Application Context
+ *
+ * UCG application context (or just a context) is an opaque handle that holds a
+ * UCG communication instance's global information.  It represents a single UCG
+ * communication instance.  The communication instance could be an OS process
+ * (an application) that uses UCP library.  This global information includes
+ * communication resources, endpoints, memory, temporary file storage, and
+ * other communication information directly associated with a specific UCG
+ * instance.  The context also acts as an isolation mechanism, allowing
+ * resources associated with the context to manage multiple concurrent
+ * communication instances. For example, users using both MPI and OpenSHMEM
+ * sessions simultaneously can isolate their communication by allocating and
+ * using separate contexts for each of them. Alternatively, users can share the
+ * communication resources (memory, network resource context, etc.) between
+ * them by using the same application context. A message sent or a RMA
+ * operation performed in one application context cannot be received in any
+ * other application context.
+ */
+typedef struct ucg_context               *ucg_context_h;
+
+
  /**
   * @ingroup UCG_GROUP
   * @brief UCG Group

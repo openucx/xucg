@@ -12,8 +12,8 @@
 #include <uct/api/uct.h>
 #include <ucs/config/parser.h>
 #include <ucs/datastruct/mpool.h>
-#include <ucs/datastruct/list_types.h>
 #include <ucs/datastruct/queue_types.h>
+#include <ucs/datastruct/list.h>
 
 BEGIN_C_DECLS
 
@@ -104,7 +104,7 @@ typedef struct ucg_plan {
     ucg_plan_component_t    *planner;
     ucg_group_id_t           group_id;
     ucg_group_member_index_t group_size;
-#ifdef UCT_COLLECTIVES
+#ifdef HAVE_UCT_COLLECTIVES
     ucg_group_member_index_t group_host_size;
 #endif
     ucg_group_member_index_t my_index;
@@ -182,8 +182,8 @@ struct ucg_plan_component {
     ucs_config_field_t      *plan_config_table;   /**< defines plan configuration options */
     void                    *plan_config;         /**< component configuration values */
     size_t                   plan_config_size;    /**< plan configuration structure size */
-    size_t                   global_context_size; /**< size to be allocated with each group */
-    size_t                   group_context_size;  /**< size to be allocated with each group */
+    size_t                   global_ctx_size;     /**< size to be allocated once, for context */
+    size_t                   per_group_ctx_size;  /**< size to be allocated with each group */
     ucs_list_link_t          list;
 
     /* Filled By UCG core, not by the component itself */
@@ -196,49 +196,55 @@ struct ucg_plan_component {
  * For Active-Message handlers - the Macros below allow translation from
  * ucp_worker_h (the AM argument) to the component's context.
  */
-#define UCG_GLOBAL_COMPONENT_CTX(comp, worker) \
-    ((void*)((char*)(worker) + (comp).global_ctx_offset))
-#define UCG_GROUP_COMPONENT_CTX(comp, group) \
-    ((void*)((char*)(group) + (comp).group_ctx_offset))
+#define UCG_GLOBAL_COMPONENT_CTX(_comp, _worker) \
+    ((void*)((char*)(_worker) + (_comp).global_ctx_offset))
+#define UCG_GROUP_COMPONENT_CTX(_comp, _group) \
+    ((void*)((char*)(_group) + (_comp).group_ctx_offset))
 
 
 /**
  * Define a planning component.
  *
- * @param _planc         Planning component structure to initialize.
- * @param _name          Planning component name.
- * @param _query         Function to query planning resources.
- * @param _prepare       Function to prepare an operation according to a plan.
- * @param _trigger       Function to start a prepared collective operation.
- * @param _destroy       Function to release a plan and all related objects.
- * @param _priv          Custom private data.
- * @param _cfg_prefix    Prefix for configuration environment variables.
- * @param _cfg_table     Defines the planning component's configuration values.
- * @param _cfg_struct    Planning component configuration structure.
+ * @param _planc       Planning component structure to initialize.
+ * @param _name        Planning component name.
+ * @param _global_size Size of the global context allocated for this planner.
+ * @param _group_size  Size of the per-group context allocated for this planner.
+ * @param _query       Function to query planning resources.
+ * @param _create      Function to create the component context.
+ * @param _destroy     Function to destroy the component context.
+ * @param _progress    Function to progress operations by this component.
+ * @param _plan        Function to create a plan for future operations.
+ * @param _prepare     Function to prepare an operation according to a plan.
+ * @param _trigger     Function to start a prepared collective operation.
+ * @param _discard     Function to release an operation and related objects.
+ * @param _print       Function to output information useful for developers.
+ * @param _cfg_prefix  Prefix for configuration environment variables.
+ * @param _cfg_table   Defines the planning component's configuration values.
+ * @param _cfg_struct  Planning component configuration structure.
  */
-#define UCG_PLAN_COMPONENT_DEFINE(_planc, _name, _global_ctx_size, \
-                                  _group_ctx_size, _query, _create, _destroy,\
-                                  _progress, _plan, _prepare, _trigger, _discard,\
-                                  _print, _cfg_prefix, _cfg_table, _cfg_struct)\
+#define UCG_PLAN_COMPONENT_DEFINE(_planc, _name, _global_size, _group_size, \
+                                  _query, _create, _destroy, _progress, _plan, \
+                                  _prepare, _trigger, _discard, _print, \
+                                  _cfg_prefix, _cfg_table, _cfg_struct) \
     ucg_plan_component_t _planc = { \
-        .global_context_size = _global_ctx_size, \
-        .group_context_size  = _group_ctx_size, \
-        .query               = _query, \
-        .create              = _create, \
-        .destroy             = _destroy, \
-        .progress            = _progress, \
-        .plan                = _plan, \
-        .prepare             = _prepare, \
-        .trigger             = _trigger, \
-        .discard             = _discard, \
-        .print               = _print, \
-        .cfg_prefix          = _cfg_prefix, \
-        .plan_config_table   = _cfg_table, \
-        .plan_config_size    = sizeof(_cfg_struct), \
-        .name                = _name \
+        .name               = _name, \
+        .global_ctx_size    = _global_size, \
+        .per_group_ctx_size = _group_size, \
+        .query              = _query, \
+        .create             = _create, \
+        .destroy            = _destroy, \
+        .progress           = _progress, \
+        .plan               = _plan, \
+        .prepare            = _prepare, \
+        .trigger            = _trigger, \
+        .discard            = _discard, \
+        .print              = _print, \
+        .cfg_prefix         = _cfg_prefix, \
+        .plan_config_table  = _cfg_table, \
+        .plan_config_size   = sizeof(_cfg_struct) \
     }; \
     UCS_STATIC_INIT { \
-        ucs_list_add_tail(&ucg_plan_components_list, &_planc.list); \
+        ucs_list_add_tail(&ucg_plan_components_list, &(_planc).list); \
     } \
     UCS_CONFIG_REGISTER_TABLE(_cfg_table, _name" planner", _cfg_prefix, _cfg_struct)
 

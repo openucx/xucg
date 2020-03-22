@@ -79,12 +79,14 @@ ucg_builtin_step_check_pending(ucg_builtin_comp_slot_t *slot)
 
             /* Handle this "waiting" packet, possibly completing the step */
             int is_step_done = slot->cb(&slot->req, header->remote_offset,
-                    header + 1, rdesc->length);
+                    header + 1, rdesc->length - sizeof(ucg_builtin_header_t));
 
             /* Dispose of the packet, according to its allocation */
             ucp_recv_desc_release(rdesc
 #ifdef HAVE_UCP_EXTENSIONS
+#ifdef UCS_MEMUNITS_INF /* Backport to UCX v1.6.0 */
                     , slot->req.step->uct_iface
+#endif
 #endif
                     );
 
