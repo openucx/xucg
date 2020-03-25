@@ -23,3 +23,10 @@ libucg_builtin_la_SOURCES = \
 	plan/builtin_recursive.c \
 	plan/builtin_bruck.c \
 	plan/builtin_pairwise.c
+
+if HAVE_COMET_HW_UD
+
+libucg_builtin_la_CPPFLAGS += $(COMET_CPPFLAGS)
+libucg_builtin_la_LDFLAGS   = $(COMET_LDFLAGS)
+
+endif # HAVE_COMET_HW_UD

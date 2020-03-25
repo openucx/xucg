@@ -113,22 +113,30 @@ ucg_builtin_choose_topology(enum ucg_collective_modifiers flags,
 
     if (flags & UCG_GROUP_COLLECTIVE_MODIFIER_AGGREGATE) {
         /* MPI_Allreduce */
+#if HAVE_COMET_HW_UD
+        topology->type = UCG_PLAN_TREE_FANIN_FANOUT;
+#else
         if (ucs_popcount(group_size) > 1) {
             /* Not a power of two */
             topology->type = UCG_PLAN_TREE_FANIN_FANOUT;
         } else {
             topology->type = UCG_PLAN_RECURSIVE;
         }
+#endif
         return UCS_OK;
     }
 
     /* MPI_Alltoall */
     ucs_assert(flags == 0);
+#if HAVE_COMET_HW_UD
+    topology->type = UCG_PLAN_TREE_FANIN_FANOUT;
+#else
     if (ucs_popcount(group_size) == 1) {
         topology->type = UCG_PLAN_ALLTOALL_BRUCK;
     } else {
         topology->type = UCG_PLAN_PAIRWISE;
     }
+#endif
     return UCS_OK;
 }
 

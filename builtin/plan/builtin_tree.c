@@ -117,6 +117,32 @@ ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
     switch (topo_type) {
     case UCG_PLAN_TREE_FANIN:
     case UCG_PLAN_TREE_FANIN_FANOUT:
+#ifdef HAVE_COMET_HW_UD
+        /* Consider inter-node acceleration (currently only fanin is supported) */
+        if (mod & UCG_GROUP_COLLECTIVE_MODIFIER_AGGREGATE) {
+            ucs_assert(step_offset == 0);
+            ucs_assert(params->root == 0);
+            ucg_group_member_index_t my_index = params->group_params->member_index;
+            int is_mock = params->coll_type->modifiers & UCG_GROUP_COLLECTIVE_MODIFIER_MOCK_EPS;
+            fanin_method = (my_index == params->root) ?
+                    UCG_PLAN_METHOD_REDUCE_TERMINAL:
+                    UCG_PLAN_METHOD_SEND_TERMINAL;
+
+            status = ucg_builtin_single_connection_phase(params->ctx, 0, 0,
+                    fanin_method, UCG_PLAN_CONNECT_FLAG_WANT_INTERNODE |
+                                  UCG_PLAN_CONNECT_FLAG_WANT_INCAST, phase++, is_mock);
+            (*phs_cnt)++;
+
+            /* acceleration only does FANIN today, so consider finishing or using
+             * the rest of the tree for fanout only (until accelerator supports it) */
+            if ((topo_type == UCG_PLAN_TREE_FANIN) || (status != UCS_OK)) {
+                return status;
+            }
+            ucs_assert(topo_type == UCG_PLAN_TREE_FANIN_FANOUT);
+            goto comet_fanout;
+        }
+#endif
+
         /* Create a phase for inter-node communication ("up the tree") */
         if (host_down_cnt) {
             fanin_method =  (mod & UCG_GROUP_COLLECTIVE_MODIFIER_AGGREGATE) ?
@@ -175,6 +201,9 @@ ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
         if (host_down_cnt) host_down_cnt--;
         /* conditional break */
     case UCG_PLAN_TREE_FANOUT:
+#if HAVE_COMET_HW_UD
+comet_fanout:
+#endif
         /* Create a phase for inter-node communication ("up the tree") */
         if (net_down_cnt) {
             fanout_method = (mod & UCG_GROUP_COLLECTIVE_MODIFIER_BROADCAST) ?

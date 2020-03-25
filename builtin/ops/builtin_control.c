@@ -8,6 +8,10 @@
 
 #include "builtin_ops.h"
 
+#if HAVE_COMET_HW_UD
+#include <uct/ib/ud/comet/ud_comet.h>
+#endif
+
 #ifndef MPI_IN_PLACE
 #define MPI_IN_PLACE ((void*)0x1)
 #endif
@@ -27,13 +31,43 @@ void ucg_builtin_init_gather(ucg_builtin_op_t *op, ucg_coll_id_t coll_id)
 
 void ucg_builtin_init_reduce(ucg_builtin_op_t *op, ucg_coll_id_t coll_id)
 {
+#if HAVE_COMET_HW_UD
+    ucg_builtin_op_step_t *comet_step = &op->steps[0];
+    // TODO: Alex: make this check detect COMET specifically
+    uint16_t am_id = 0;
+    int is_comet = (comet_step->uct_iface->ops.iface_tag_recv_zcopy != NULL);
+    if (is_comet) {
+        am_id = comet_step->am_id;
+        comet_step->am_id = COMET_TABLE_OPERATION_REDUCE;
+    }
+#endif
+
     /* Skip unless root */
     if (op->super.params.type.root != op->super.plan->my_index) {
         return;
     }
 
+#if HAVE_COMET_HW_UD
+    if (is_comet) {
+        ucs_assert(comet_step->phase->ep_cnt == 1);
+
+        /* Set the incoming buffer, and config the table*/
+        uct_iov_t iov = {
+                .buffer = comet_step->send_buffer,
+                .length = comet_step->buffer_length,
+                .memh   = comet_step->zcopy.memh
+        };
+
+        /* WARNING: severe parameter type abuse ahead */
+        comet_step->uct_iface->ops.iface_tag_recv_zcopy(comet_step->uct_iface,
+                UCT_UD_COMET_COLL_TYPE_REDUCE, am_id, &iov, 1, NULL);
+        /* plan->am_id is used because step->am_id is overwritten just prior */
+        return;
+    }
+#else
     ucg_builtin_op_step_t *step = &op->steps[0];
     memcpy(step->recv_buffer, step->send_buffer, step->buffer_length);
+#endif
 }
 
 /* Alltoall Bruck phase 1/3: shuffle the data */
