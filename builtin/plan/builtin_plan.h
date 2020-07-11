@@ -27,8 +27,10 @@ typedef struct ucg_builtin_plan_topology {
 
 enum ucg_builtin_plan_method_type {
     UCG_PLAN_METHOD_SEND_TERMINAL,     /* Send the message(s), nothing fancy */
+    UCG_PLAN_METHOD_SEND_TO_SM_ROOT,   /* Send into a shared buffer on root */
     UCG_PLAN_METHOD_RECV_TERMINAL,     /* Final stop for incoming messages */
     UCG_PLAN_METHOD_BCAST_WAYPOINT,    /* receive and send on to all peers */
+    UCG_PLAN_METHOD_GATHER_TERMINAL,   /* gather from all peers in the map */
     UCG_PLAN_METHOD_GATHER_WAYPOINT,   /* gather from all peers, and pass on */
     UCG_PLAN_METHOD_SCATTER_TERMINAL,  /* scatter to all peers in the map */
     UCG_PLAN_METHOD_SCATTER_WAYPOINT,  /* scatter and send "downwards" */
@@ -48,19 +50,13 @@ typedef struct ucg_builtin_plan_phase {
         uct_ep_h                      single_ep;     /* single endpoint handle */
     };
     uint64_t                         *resends;       /* (per-group) step resend bitfield */
-    uint16_t                          ep_cnt;        /* Number of endpoints (below) */
+    uint8_t                           ep_cnt;        /* Number of endpoints (below) */
     uint16_t                          host_proc_cnt; /* Number of members per host */
     ucg_step_idx_t                    step_index;    /* determines step index */
     /* Until this point - also used during step execution ("data path") */
 
     /* From here on - only used during step creation ("control path") */
     enum ucg_builtin_plan_method_type method;        /* how to apply this map */
-    size_t                            max_short_one; /* max single short message */
-    size_t                            max_short_max; /* max length to use short */
-    size_t                            max_bcopy_one; /* max single bcopy message */
-    size_t                            max_bcopy_max; /* max length to use bcopy */
-    size_t                            max_zcopy_one; /* max single zcopy message */
-
     uct_md_h                          md;            /* memory (registration) domain */
     const uct_md_attr_t              *md_attr;       /* memory domain attributes */
     const uct_iface_attr_t           *iface_attr;    /* interface attributes */
@@ -71,6 +67,7 @@ typedef struct ucg_builtin_plan_phase {
 #endif
 } ucg_builtin_plan_phase_t;
 
+typedef struct ucg_builtin_config ucg_builtin_config_t;
 typedef struct ucg_builtin_group_ctx ucg_builtin_group_ctx_t;
 typedef struct ucg_builtin_plan {
     ucg_plan_t               super;
@@ -81,6 +78,7 @@ typedef struct ucg_builtin_plan {
     ucg_step_idx_t           phs_cnt; /* number of phases in the normal flow */
     uint8_t                  ep_cnt;  /* total endpoint count */
     uint16_t                 am_id;   /* active message ID */
+    ucg_builtin_config_t    *config;  /* configured settings */
     ucg_builtin_plan_phase_t phss[];  /* topology's phases */
 /*  uct_ep_h                 eps[];    * logically located here */
 } ucg_builtin_plan_t;
@@ -96,12 +94,11 @@ ucs_status_t ucg_builtin_single_connection_phase(ucg_builtin_group_ctx_t *ctx,
         ucg_builtin_plan_phase_t *phase,
         int is_mock);
 
-typedef struct ucg_builtin_config ucg_builtin_config_t;
-
 typedef struct ucg_builtin_tree_config {
     unsigned radix;
 #define UCG_BUILTIN_TREE_MAX_RADIX (128)
     unsigned sock_thresh;
+    ucg_group_member_index_t my_index;
 } ucg_builtin_tree_config_t;
 
 extern ucs_config_field_t ucg_builtin_tree_config_table[];
@@ -152,7 +149,7 @@ typedef struct ucg_builtin_topo_tree_root_phase {
 ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
         ucg_builtin_topo_tree_root_phase_t *root,
         const ucg_builtin_tree_params_t *params,
-        ucg_step_idx_t step_offset, uct_ep_h *first_ep,
+        ucg_step_idx_t step_offset, unsigned ppn, uct_ep_h *first_ep,
         ucg_group_member_index_t *host_up,   unsigned host_up_cnt,
         ucg_group_member_index_t *net_up,    unsigned net_up_cnt,
         ucg_group_member_index_t *net_down,  unsigned net_down_cnt,
@@ -200,10 +197,10 @@ struct ucg_builtin_config {
     ucg_builtin_recursive_config_t recursive;
     ucg_builtin_neighbor_config_t  neighbor;
 
-    unsigned                       cache_size;
     size_t                         short_max_tx;
     size_t                         bcopy_max_tx;
     unsigned                       mem_reg_opt_cnt;
+    unsigned                       mem_rma_opt_cnt;
 };
 
 #endif

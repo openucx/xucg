@@ -8,22 +8,23 @@
 
 #include "../api/ucg_plan_component.h"
 
-/* Functions on all planning components */
-ucs_status_t ucg_plan_query(unsigned *next_am_id, ucg_plan_desc_t **resources_p, unsigned *num_resources_p);
-void ucg_plan_release_list(ucg_plan_desc_t *resources, unsigned resource_cnt);
-ucs_status_t ucg_plan_select_component(ucg_plan_desc_t *planners,
-                                       unsigned num_planners,
-                                       const char* planner_name,
-                                       const ucg_group_params_t *group_params,
-                                       const ucg_collective_params_t *coll_params,
-                                       ucg_plan_component_t **planc_p);
+size_t ucg_plan_get_context_size(ucg_plan_desc_t *descs, unsigned desc_cnt);
 
-/* Functions on a specific component */
-#define ucg_plan(planc, group_ctx, coll_params, plan_p) \
-    (planc->plan(planc, group_ctx, coll_params, plan_p))
-#define ucg_prepare(plan, params, op) ((plan)->planner->prepare(plan, params, op))
-#define ucg_trigger(op, cid, req)     ((op)->plan->planner->trigger(op, cid, req))
-#define ucg_discard(op)               ((op)->plan->planner->discard(op))
-#define ucg_destroy(plan)             ((plan)->planner->destroy(plan))
+ucs_status_t ucg_plan_query(ucg_plan_desc_t **desc_p, unsigned *num_desc_p,
+                            size_t *total_plan_ctx_size);
+
+ucs_status_t ucg_plan_init(ucg_plan_desc_t *descs, unsigned desc_cnt,
+                           ucg_plan_ctx_h plan, size_t *per_group_ctx_size);
+
+void ucg_plan_finalize(ucg_plan_desc_t *descs, unsigned desc_cnt,
+                       ucg_plan_ctx_h plan);
+
+ucs_status_t ucg_plan_group_create(ucg_group_h group);
+
+unsigned ucg_plan_group_progress(ucg_group_h group);
+
+void ucg_plan_group_destroy(ucg_group_h group);
+
+void ucg_plan_print_info(ucg_plan_desc_t *descs, unsigned desc_cnt, FILE *stream);
 
 #endif /* UCG_PLAN_H_ */

@@ -7,7 +7,6 @@
 #include <ucs/debug/log.h>
 #include <ucs/debug/memtrack.h>
 #include <uct/api/uct_def.h>
-#include <ucg/api/ucg_mpi.h>
 
 #include "builtin_plan.h"
 

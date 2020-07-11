@@ -3,20 +3,28 @@
  * See file LICENSE for terms.
  */
 
-#ifdef HAVE_CONFIG_H
-#  include "config.h"
-#endif
-
+#include "ucg_plan.h"
 #include "ucg_group.h"
+#include "ucg_context.h"
 
+#include <ucp/core/ucp_worker.h>
 #include <ucs/datastruct/queue.h>
 #include <ucs/datastruct/list.h>
 #include <ucs/profile/profile.h>
 #include <ucs/debug/memtrack.h>
-#include <ucp/core/ucp_ep.inl>
-#include <ucp/core/ucp_worker.h>
-#include <ucp/core/ucp_ep.inl>
-#include <ucp/core/ucp_proxy_ep.h> /* for @ref ucp_proxy_ep_test */
+
+
+#define UCG_GROUP_PARAM_REQUIRED_MASK (UCG_GROUP_PARAM_FIELD_MEMBER_COUNT |\
+                                       UCG_GROUP_PARAM_FIELD_MEMBER_INDEX |\
+                                       UCG_GROUP_PARAM_FIELD_CB_CONTEXT)
+
+enum ucg_group_cmp_mode {
+    UCG_GROUP_CMP_MODE_FULL      = 0,
+    UCG_GROUP_CMP_MODE_RECV_ONLY = UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_SEND >> 14,
+    UCG_GROUP_CMP_MODE_SEND_ONLY = UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_RECV >> 14,
+    UCG_GROUP_CMP_MODE_BARRIER   = (UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_SEND |
+                                    UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_RECV) >> 14
+};
 
 #if ENABLE_STATS
 /**
@@ -44,448 +52,212 @@ static ucs_stats_class_t ucg_group_stats_class = {
         [UCG_GROUP_STAT_OPS_IMMEDIATE] = "ops_immediate"
     }
 };
-#endif
+#endif /* ENABLE_STATS */
 
-#define UCG_GROUP_PROGRESS_ADD(iface, ctx) {          \
-    unsigned _idx = 0;                                \
-    if (ucs_unlikely(_idx == UCG_GROUP_MAX_IFACES)) { \
-        return UCS_ERR_EXCEEDS_LIMIT;                 \
-    }                                                 \
-                                                      \
-    while (_idx < (ctx)->iface_cnt) {                 \
-        if ((ctx)->ifaces[_idx] == (iface)) {         \
-            break;                                    \
-        }                                             \
-        _idx++;                                       \
-    }                                                 \
-                                                      \
-    if (_idx == (ctx)->iface_cnt) {                   \
-        (ctx)->ifaces[(ctx)->iface_cnt++] = (iface);  \
-    }                                                 \
-}
-
-__KHASH_IMPL(ucg_group_ep, static UCS_F_MAYBE_UNUSED inline,
-             ucg_group_member_index_t, ucp_ep_h, 1, kh_int64_hash_func,
-             kh_int64_hash_equal);
-
-#ifdef HAVE_UCP_EXTENSIONS
-
-/* If UCP supporst extension - UCG is simply a wrapper */
-struct ucg_context { ucp_context_t *super; };
-
-ucs_status_t ucg_worker_create(ucg_context_h context,
-                               const ucp_worker_params_t *params,
-                               ucg_worker_h *worker_p)
-{
-    return ucp_worker_create(context->super, params, worker_p);
-}
-
-#else
-
-/*
- * Per the UCX community's request to make minimal changes to accomodate UCG,
- * this code was added - duplicating UCP worker creation in a way UCG can use.
- */
-#include <ucp/core/ucp_worker.c> /* Needed to provide worker creation logic */
-
-/**
- * This code is intended to reside in UCP, but is "hosted" in UCG for now...
- */
-
-typedef ucs_status_t (*ucp_ext_init_f)(ucp_worker_h worker,
-                                       unsigned *next_am_id,
-                                       void *ext_ctx);
-
-typedef void (*ucp_ext_cleanup_f)(void *ext_ctx);
-
-typedef struct ucp_context_extension {
-    ucs_list_link_t   list;          /* extension list membership */
-    size_t            worker_offset; /* offset from worker to extension ctx */
-    ucp_ext_init_f    init;          /* extension init function */
-    ucp_ext_cleanup_f cleanup;       /* extension cleanup function */
-} ucp_context_extension_t;
-
-struct ucg_context {
-    ucp_context_t    *super;          /* Extending the UCP context */
-    size_t            worker_size;    /* Worker allocation size */
-    ucs_list_link_t   extensions;     /* List of registered extensions */
-    unsigned          last_am_id;     /* Last used AM ID */
-};
-
-
-ucs_status_t ucp_worker_create_by_size(ucp_context_h context,
-                                       const ucp_worker_params_t *params,
-                                       size_t worker_size,
-                                       ucp_worker_h *worker_p)
-{
-    ucs_thread_mode_t uct_thread_mode;
-    unsigned config_count;
-    unsigned name_length;
-    ucp_worker_h worker;
-    ucs_status_t status;
-
-    config_count = ucs_min((context->num_tls + 1) * (context->num_tls + 1) * context->num_tls,
-                           UINT8_MAX);
-
-    worker = ucs_calloc(1, worker_size, "ucp worker");
-    if (worker == NULL) {
-        return UCS_ERR_NO_MEMORY;
-    }
-
-    uct_thread_mode = UCS_THREAD_MODE_SINGLE;
-    worker->flags   = 0;
-
-    if (params->field_mask & UCP_WORKER_PARAM_FIELD_THREAD_MODE) {
 #if ENABLE_MT
-        if (params->thread_mode != UCS_THREAD_MODE_SINGLE) {
-            /* UCT is serialized by UCP lock or by UCP user */
-            uct_thread_mode = UCS_THREAD_MODE_SERIALIZED;
-        }
-
-        if (params->thread_mode == UCS_THREAD_MODE_MULTI) {
-            worker->flags |= UCP_WORKER_FLAG_MT;
-        }
+#define UCG_GROUP_THREAD_CS_ENTER(_obj) ucs_recursive_spin_lock(&(_obj)->lock);
+#define UCG_GROUP_THREAD_CS_EXIT(_obj)  ucs_recursive_spin_unlock(&(_obj)->lock);
 #else
-        if (params->thread_mode != UCS_THREAD_MODE_SINGLE) {
-            ucs_debug("forced single thread mode on worker create");
-        }
-#endif
-    }
-
-    worker->context           = context;
-    worker->uuid              = ucs_generate_uuid((uintptr_t)worker);
-    worker->flush_ops_count   = 0;
-    worker->inprogress        = 0;
-    worker->ep_config_max     = config_count;
-    worker->ep_config_count   = 0;
-    worker->num_active_ifaces = 0;
-    worker->num_ifaces        = 0;
-    worker->am_message_id     = ucs_generate_uuid(0);
-    ucs_list_head_init(&worker->arm_ifaces);
-    ucs_list_head_init(&worker->stream_ready_eps);
-    ucs_list_head_init(&worker->all_eps);
-    ucp_ep_match_init(&worker->ep_match_ctx);
-
-    UCS_STATIC_ASSERT(sizeof(ucp_ep_ext_gen_t) <= sizeof(ucp_ep_t));
-    if (context->config.features & (UCP_FEATURE_STREAM | UCP_FEATURE_AM)) {
-        UCS_STATIC_ASSERT(sizeof(ucp_ep_ext_proto_t) <= sizeof(ucp_ep_t));
-        ucs_strided_alloc_init(&worker->ep_alloc, sizeof(ucp_ep_t), 3);
-    } else {
-        ucs_strided_alloc_init(&worker->ep_alloc, sizeof(ucp_ep_t), 2);
-    }
-
-    if (params->field_mask & UCP_WORKER_PARAM_FIELD_USER_DATA) {
-        worker->user_data = params->user_data;
-    } else {
-        worker->user_data = NULL;
-    }
-
-    if (context->config.features & UCP_FEATURE_AM){
-        worker->am_cbs            = NULL;
-        worker->am_cb_array_len   = 0;
-    }
-    name_length = ucs_min(UCP_WORKER_NAME_MAX,
-                          context->config.ext.max_worker_name + 1);
-    ucs_snprintf_zero(worker->name, name_length, "%s:%d", ucs_get_host_name(),
-                      getpid());
-
-    /* Create statistics */
-    status = UCS_STATS_NODE_ALLOC(&worker->stats, &ucp_worker_stats_class,
-                                  ucs_stats_get_root(), "-%p", worker);
-    if (status != UCS_OK) {
-        goto err_free;
-    }
-
-    status = UCS_STATS_NODE_ALLOC(&worker->tm_offload_stats,
-                                  &ucp_worker_tm_offload_stats_class,
-                                  worker->stats);
-    if (status != UCS_OK) {
-        goto err_free_stats;
-    }
-
-    status = ucs_async_context_init(&worker->async,
-                                    context->config.ext.use_mt_mutex ?
-                                    UCS_ASYNC_MODE_THREAD_MUTEX :
-                                    UCS_ASYNC_THREAD_LOCK_TYPE);
-    if (status != UCS_OK) {
-        goto err_free_tm_offload_stats;
-    }
-
-    /* Create the underlying UCT worker */
-    status = uct_worker_create(&worker->async, uct_thread_mode, &worker->uct);
-    if (status != UCS_OK) {
-        goto err_destroy_async;
-    }
-
-    /* Create memory pool for requests */
-    status = ucs_mpool_init(&worker->req_mp, 0,
-                            sizeof(ucp_request_t) + context->config.request.size,
-                            0, UCS_SYS_CACHE_LINE_SIZE, 128, UINT_MAX,
-                            &ucp_request_mpool_ops, "ucp_requests");
-    if (status != UCS_OK) {
-        goto err_destroy_uct_worker;
-    }
-
-    /* create memory pool for small rkeys */
-    status = ucs_mpool_init(&worker->rkey_mp, 0,
-                            sizeof(ucp_rkey_t) +
-                            sizeof(ucp_tl_rkey_t) * UCP_RKEY_MPOOL_MAX_MD,
-                            0, UCS_SYS_CACHE_LINE_SIZE, 128, UINT_MAX,
-                            &ucp_rkey_mpool_ops, "ucp_rkeys");
-    if (status != UCS_OK) {
-        goto err_req_mp_cleanup;
-    }
-
-    /* Create UCS event set which combines events from all transports */
-    status = ucp_worker_wakeup_init(worker, params);
-    if (status != UCS_OK) {
-        goto err_rkey_mp_cleanup;
-    }
-
-    if (params->field_mask & UCP_WORKER_PARAM_FIELD_CPU_MASK) {
-        worker->cpu_mask = params->cpu_mask;
-    } else {
-        UCS_CPU_ZERO(&worker->cpu_mask);
-    }
-
-    /* Initialize tag matching */
-    status = ucp_tag_match_init(&worker->tm);
-    if (status != UCS_OK) {
-        goto err_wakeup_cleanup;
-    }
-
-    /* Open all resources as interfaces on this worker */
-    status = ucp_worker_add_resource_ifaces(worker);
-    if (status != UCS_OK) {
-        goto err_close_ifaces;
-    }
-
-    /* Open all resources as connection managers on this worker */
-    status = ucp_worker_add_resource_cms(worker);
-    if (status != UCS_OK) {
-        goto err_close_cms;
-    }
-
-    /* create mem type endponts */
-    status = ucp_worker_create_mem_type_endpoints(worker);
-    if (status != UCS_OK) {
-        goto err_close_cms;
-    }
-
-    /* Init AM and registered memory pools */
-    status = ucp_worker_init_mpools(worker);
-    if (status != UCS_OK) {
-        goto err_close_cms;
-    }
-
-    /* Select atomic resources */
-    ucp_worker_init_atomic_tls(worker);
-
-    /* At this point all UCT memory domains and interfaces are already created
-     * so warn about unused environment variables.
-     */
-    ucs_config_parser_warn_unused_env_vars_once();
-
-    *worker_p = worker;
-    return UCS_OK;
-
-err_close_cms:
-    ucp_worker_close_cms(worker);
-err_close_ifaces:
-    ucp_worker_close_ifaces(worker);
-    ucp_tag_match_cleanup(&worker->tm);
-err_wakeup_cleanup:
-    ucp_worker_wakeup_cleanup(worker);
-err_rkey_mp_cleanup:
-    ucs_mpool_cleanup(&worker->rkey_mp, 1);
-err_req_mp_cleanup:
-    ucs_mpool_cleanup(&worker->req_mp, 1);
-err_destroy_uct_worker:
-    uct_worker_destroy(worker->uct);
-err_destroy_async:
-    ucs_async_context_cleanup(&worker->async);
-err_free_tm_offload_stats:
-    UCS_STATS_NODE_FREE(worker->tm_offload_stats);
-err_free_stats:
-    UCS_STATS_NODE_FREE(worker->stats);
-err_free:
-    ucs_strided_alloc_cleanup(&worker->ep_alloc);
-    ucs_free(worker);
-    return status;
-}
-
-ucs_status_t ucg_worker_create(ucg_context_h context,
-                               const ucp_worker_params_t *params,
-                               ucg_worker_h *worker_p)
-{
-    return ucp_worker_create_by_size(context->super, params,
-            context->worker_size, worker_p);
-}
-
-ucs_status_t ucp_extend(ucg_context_h context, size_t extension_ctx_length,
-                        ucp_ext_init_f init, ucp_ext_cleanup_f cleanup,
-                        size_t *extension_ctx_offset_in_worker)
-{
-    ucp_context_extension_t *ext = ucs_malloc(sizeof(*ext), "context extension");
-    if (!ext) {
-        return UCS_ERR_NO_MEMORY;
-    }
-
-    ext->init                       = init;
-    ext->cleanup                    = cleanup;
-    ext->worker_offset              = context->worker_size;
-    context->worker_size           += extension_ctx_length;
-    *extension_ctx_offset_in_worker = ext->worker_offset;
-
-    ucs_list_add_tail(&context->extensions, &ext->list);
-    return UCS_OK;
-}
-
-void ucp_extension_cleanup(ucg_context_h context)
-{
-    ucp_context_extension_t *ext, *iter;
-    ucs_list_for_each_safe(ext, iter, &context->extensions, list) {
-        ucs_list_del(&ext->list);
-        ucs_free(ext);
-    } /* Why not simply use while(!is_empty()) ? CLANG emits a false positive */
-}
+#define UCG_GROUP_THREAD_CS_ENTER(_obj)
+#define UCG_GROUP_THREAD_CS_EXIT(_obj)
 #endif
 
-unsigned ucg_worker_progress(ucg_worker_h worker)
+static UCS_F_ALWAYS_INLINE
+ucg_context_h ucg_worker_get_context(ucp_worker_h worker)
+{
+    return ucs_container_of(worker->context, ucg_context_t, ucp_ctx);
+}
+
+unsigned ucg_worker_progress(ucp_worker_h worker)
 {
     unsigned idx, ret = 0;
-    ucg_groups_t *gctx = UCG_WORKER_TO_GROUPS_CTX(worker);
+    ucg_context_t *ctx = ucg_worker_get_context(worker);
 
     /* First, try the interfaces used for collectives */
-    for (idx = 0; idx < gctx->iface_cnt; idx++) {
-        ret += uct_iface_progress(gctx->ifaces[idx]);
+    for (idx = 0; idx < ctx->iface_cnt; idx++) {
+        ret += uct_iface_progress(ctx->ifaces[idx]);
     }
 
-    /* As a fallback (and for correctness - try all other transports */
-    return ucp_worker_progress(worker);
+    /* As a fallback (and for correctness) - try all other transports */
+    return ret + ucp_worker_progress(worker);
 }
 
 unsigned ucg_group_progress(ucg_group_h group)
 {
-    unsigned idx, ret = 0;
-    ucg_groups_t *gctx = UCG_WORKER_TO_GROUPS_CTX(group->worker);
-
-    /* First, try the per-planner progress functions */
-    for (idx = 0; idx < gctx->num_planners; idx++) {
-        ucg_plan_component_t *planc = gctx->planners[idx].plan_component;
-        ret += planc->progress(group);
-    }
+    unsigned ret = ucg_plan_group_progress(group);
     if (ret) {
         return ret;
     }
 
-    /* Next, try the per-group interfaces */
-    for (idx = 0; idx < group->iface_cnt; idx++) {
-        ret += uct_iface_progress(group->ifaces[idx]);
-    }
-    if (ret) {
-        return ret;
-    }
-
-    /* Lastly, try the "global" progress */
     return ucg_worker_progress(group->worker);
 }
 
-size_t ucg_ctx_worker_offset;
-ucs_status_t ucg_group_create(ucg_worker_h worker,
+static inline ucs_status_t ucg_group_plan(ucg_group_h group,
+                                          const ucg_collective_params_t *params,
+                                          ucg_plan_t **plan_p)
+{
+    ucg_plan_t *plan;
+    ucs_status_t status;
+    ucg_group_ctx_h gctx;
+    ucg_plan_desc_t *planner;
+
+    UCS_PROFILE_CODE("ucg_choose") {
+        status = ucg_plan_choose(params, group, &planner, &gctx);
+    }
+    if (ucs_unlikely(status != UCS_OK)) {
+        return status;
+    }
+
+    UCS_PROFILE_CODE("ucg_plan") {
+        status = planner->component->plan(gctx, &params->type, &plan);
+    }
+    if (ucs_unlikely(status != UCS_OK)) {
+        return status;
+    }
+
+#if ENABLE_MT
+    status = ucs_recursive_spinlock_init(&plan->lock, 0);
+    if (ucs_unlikely(status != UCS_OK)) {
+        return status;
+    }
+#endif
+
+    if (group->params.field_mask & UCG_GROUP_PARAM_FIELD_MEMBER_INDEX) {
+        plan->my_index = group->params.member_index;
+    }
+    if (group->params.field_mask & UCG_GROUP_PARAM_FIELD_MEMBER_COUNT) {
+        plan->group_size = group->params.member_count;
+    }
+
+    ucs_list_head_init(&plan->op_head);
+
+    plan->group_id = group->params.id;
+    plan->planner  = planner;
+    plan->group    = group;
+    *plan_p        = plan;
+
+    return UCS_OK;
+}
+
+static ucs_status_t ucg_group_init_cache(ucg_group_h group)
+{
+    ucs_status_t status;
+    ucg_collective_params_t coll_params = {
+        .type = {
+            .modifiers = UCG_GROUP_COLLECTIVE_MODIFIER_AGGREGATE   |
+                         UCG_GROUP_COLLECTIVE_MODIFIER_BROADCAST   |
+                         UCG_GROUP_COLLECTIVE_MODIFIER_BARRIER     |
+                         UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_SEND |
+                         UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_RECV,
+            .root      = 0
+        },
+        .comp_cb = NULL
+    };
+
+    /* Clear the cache */
+    memset(group->cache, 0, sizeof(group->cache));
+
+    /* Create a plan for barrier, so that we can assume it exists in run-time */
+    status = ucg_group_plan(group, &coll_params, &group->barrier_cache);
+    if (ucs_unlikely(status != UCS_OK)) {
+        return status;
+    }
+
+    /* Also plan the non-barrier counter-part - so that fast-path runs right */
+    coll_params.type.modifiers &= UCG_GROUP_CACHE_MODIFIER_MASK;
+    return ucg_group_plan(group, &coll_params,
+                          &group->cache[coll_params.type.modifiers]);
+}
+
+ucs_status_t ucg_group_create(ucp_worker_h worker,
                               const ucg_group_params_t *params,
                               ucg_group_h *group_p)
 {
     ucs_status_t status;
-    ucg_groups_t *ctx = UCG_WORKER_TO_GROUPS_CTX(worker);
-    UCP_WORKER_THREAD_CS_ENTER_CONDITIONAL(worker); // TODO: check where needed
+    ucg_context_t *ctx = ucg_worker_get_context(worker);
 
-    /* allocate a new group */
-    size_t distance_size              = sizeof(*params->distance) * params->member_count;
-    struct ucg_group *new_group       = ucs_malloc(sizeof(struct ucg_group) +
-            ctx->total_planner_sizes + distance_size, "communicator group");
-    if (new_group == NULL) {
-        status = UCS_ERR_NO_MEMORY;
-        goto cleanup_none;
+    if (!ucs_test_all_flags(params->field_mask, UCG_GROUP_PARAM_REQUIRED_MASK)) {
+        ucs_error("UCG is missing some critical group parameters");
+        return UCS_ERR_INVALID_PARAM;
     }
 
-    /* fill in the group fields */
-    new_group->is_barrier_outstanding = 0;
-    new_group->group_id               = ctx->next_id++;
-    new_group->worker                 = worker;
-    new_group->next_id                = UCG_GROUP_FIRST_ID;  // TODO: fix wrap-around !
-    new_group->iface_cnt              = 0;
+    /* Allocate a new group */
+    size_t distance_size    = sizeof(*params->distance) * params->member_count;
+    size_t total_group_size = sizeof(struct ucg_group) +
+                              ctx->per_group_planners_ctx + distance_size;
+    struct ucg_group *group = UCS_ALLOC_CHECK(total_group_size,
+                                              "communicator group");
 
-    ucs_queue_head_init(&new_group->pending);
-    kh_init_inplace(ucg_group_ep, &new_group->eps);
-    memcpy((ucg_group_params_t*)&new_group->params, params, sizeof(*params));
-    new_group->params.distance = (typeof(params->distance))((char*)(new_group
-            + 1) + ctx->total_planner_sizes);
-    memcpy(new_group->params.distance, params->distance, distance_size);
-    memset(new_group + 1, 0, ctx->total_planner_sizes);
+    /* Fill in the group fields */
+    group->is_barrier_outstanding = 0;
+    group->is_cache_cleanup_due   = 0;
+    group->context                = ctx;
+    group->worker                 = worker;
+    group->next_coll_id           = 0;
+    group->iface_cnt              = 0;
 
-    unsigned idx;
-    for (idx = 0; idx < UCG_GROUP_COLLECTIVE_MODIFIER_MASK; idx++) {
-        new_group->cache[idx] = NULL;
+#if ENABLE_MT
+    ucs_recursive_spinlock_init(&group->lock, 0);
+#endif
+    ucs_queue_head_init(&group->pending);
+    memcpy((ucg_group_params_t*)&group->params, params, sizeof(*params));
+    // TODO: replace memcpy with per-field copy to improve ABI compatibility
+    group->params.distance = (typeof(params->distance))((char*)(group
+            + 1) + ctx->per_group_planners_ctx);
+
+    if (params->field_mask & UCG_GROUP_PARAM_FIELD_DISTANCES) {
+        memcpy(group->params.distance, params->distance, distance_size);
+    } else {
+        /* If the user didn't specify the distances - treat as uniform */
+        memset(group->params.distance, UCG_GROUP_MEMBER_DISTANCE_LAST,
+               distance_size);
     }
 
-    /* Create a loopback connection, since resolve_cb may fail loopback */
-    ucp_ep_params_t ep_params = { .field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS };
-    status = ucp_worker_get_address(worker, (ucp_address_t**)&ep_params.address,
-            &distance_size);
+    if ((params->field_mask & UCG_GROUP_PARAM_FIELD_ID) != 0) {
+        ctx->next_group_id = ucs_max(ctx->next_group_id, group->params.id);
+    } else {
+        group->params.id = ++ctx->next_group_id;
+        group->params.field_mask |= UCG_GROUP_PARAM_FIELD_ID;
+    }
+
+    /* Initialize the planners (loadable modules) */
+    status = ucg_plan_group_create(group);
     if (status != UCS_OK) {
-        return status;
+        goto cleanup_group;
     }
-    ucp_ep_h loopback_ep;
-    status = ucp_ep_create(worker, &ep_params, &loopback_ep);
-    ucp_worker_release_address(worker, (ucp_address_t*)ep_params.address);
+
+    status = ucg_group_init_cache(group);
     if (status != UCS_OK) {
-        return status;
+        goto cleanup_group;
     }
 
-    /* Store this loopback endpoint, for future reference */
-    ucg_group_member_index_t my_index = new_group->params.member_index;
-    ucs_assert(kh_get(ucg_group_ep, &new_group->eps, my_index) == kh_end(&new_group->eps));
-    khiter_t iter = kh_put(ucg_group_ep, &new_group->eps, my_index, (int*)&idx);
-    kh_value(&new_group->eps, iter) = loopback_ep;
-
-    /* Initialize the planners (modules) */
-    for (idx = 0; idx < ctx->num_planners; idx++) {
-        /* Create the per-planner per-group context */
-        ucg_plan_component_t *planner = ctx->planners[idx].plan_component;
-        status = planner->create(planner, worker, new_group,
-                new_group->group_id, &new_group->params);
-        if (status != UCS_OK) {
-            goto cleanup_planners;
-        }
-    }
-
-    status = UCS_STATS_NODE_ALLOC(&new_group->stats,
-            &ucg_group_stats_class, worker->stats, "-%p", new_group);
+    status = UCS_STATS_NODE_ALLOC(&group->stats,
+                                  &ucg_group_stats_class,
+                                  worker->stats, "-%p", group);
     if (status != UCS_OK) {
-        goto cleanup_planners;
+        goto cleanup_group;
     }
 
-    ucs_list_add_head(&ctx->groups_head, &new_group->list);
-    UCP_WORKER_THREAD_CS_EXIT_CONDITIONAL(worker);
-    *group_p = new_group;
+    ucs_list_add_head(&ctx->groups_head, &group->list);
+
+    *group_p = group;
     return UCS_OK;
 
-cleanup_planners:
-    while (idx) {
-        ucg_plan_component_t *planner = ctx->planners[idx--].plan_component;
-        planner->destroy((void*)new_group);
-    }
-    ucs_free(new_group);
-
-cleanup_none:
-    UCP_WORKER_THREAD_CS_EXIT_CONDITIONAL(worker);
+cleanup_group:
+    ucs_free(group);
     return status;
 }
 
 const ucg_group_params_t* ucg_group_get_params(ucg_group_h group)
 {
     return &group->params;
+}
+
+static ucs_status_t ucg_group_cache_cleanup(ucg_group_h group)
+{
+    // TODO: implement... otherwise cache might grow too big!
+    // TODO: use "op->discard_f(op);"
+    return UCS_OK;
 }
 
 void ucg_group_destroy(ucg_group_h group)
@@ -495,147 +267,208 @@ void ucg_group_destroy(ucg_group_h group)
         ucg_group_progress(group);
     }
 
-#if ENABLE_MT
-    ucg_worker_h worker = group->worker;
-#endif
-    UCP_WORKER_THREAD_CS_ENTER_CONDITIONAL(worker);
+    UCG_GROUP_THREAD_CS_ENTER(group)
 
-    /* TODO: fix:
-    unsigned idx;
-    ucg_groups_t *gctx = UCG_WORKER_TO_GROUPS_CTX(group->worker);
-    for (idx = 0; idx < gctx->num_planners; idx++) {
-        ucg_plan_component_t *planc = gctx->planners[idx].plan_component;
-         fix planc->destroy(group);
-    }*/
-
-    kh_destroy_inplace(ucg_group_ep, &group->eps);
+    ucg_plan_group_destroy(group);
     UCS_STATS_NODE_FREE(group->stats);
     ucs_list_del(&group->list);
+
+    UCG_GROUP_THREAD_CS_EXIT(group)
+
+#if ENABLE_MT
+    ucs_recursive_spinlock_destroy(&group->lock);
+#endif
+
     ucs_free(group);
-
-    UCP_WORKER_THREAD_CS_EXIT_CONDITIONAL(worker);
 }
 
-ucs_status_t ucg_request_check_status(void *request)
+void ucg_request_cancel(ucg_group_h group, ucg_request_t *req)
 {
-    ucg_request_t *req = (ucg_request_t*)request - 1;
+    // TODO: implement
+}
 
-    if (req->flags & UCG_REQUEST_COMMON_FLAG_COMPLETED) {
-        ucs_assert(req->status != UCS_INPROGRESS);
-        return req->status;
+static UCS_F_ALWAYS_INLINE int
+ucg_group_is_matching_op(enum ucg_group_cmp_mode mode,
+                         const ucg_collective_params_t *a,
+                         const ucg_collective_params_t *b)
+{
+    size_t cmp_size;
+    size_t cmp_offset;
+
+    switch (mode) {
+    case UCG_GROUP_CMP_MODE_FULL:
+        cmp_size   = sizeof(ucg_collective_params_t);
+        cmp_offset = 0;
+        break;
+
+    case UCG_GROUP_CMP_MODE_SEND_ONLY:
+        cmp_size   = offsetof(ucg_collective_params_t, recv);
+        cmp_offset = 0;
+        break;
+
+    case UCG_GROUP_CMP_MODE_RECV_ONLY:
+        cmp_size   = sizeof(ucg_collective_params_t) -
+                     offsetof(ucg_collective_params_t, recv);
+        cmp_offset = offsetof(ucg_collective_params_t, recv);
+        break;
+
+    case UCG_GROUP_CMP_MODE_BARRIER:
+        /* Barrier only - has a different solution... will never get here */
+        ucs_assert_always(0);
+        break;
     }
-    return UCS_INPROGRESS;
-}
 
-void ucg_request_cancel(ucg_worker_h worker, void *request) { }
+    ucs_assert((mode == UCG_GROUP_CMP_MODE_RECV_ONLY) ||
+               ((a->recv_only.type.modifiers == 0) &&
+                (b->recv_only.type.modifiers == 0) &&
+                (a->recv_only.type.root == 0)      &&
+                (b->recv_only.type.root == 0)      &&
+                (a->recv_only.comp_cb == 0)        &&
+                (b->recv_only.comp_cb == 0)));
 
-void ucg_request_free(void *request) { }
+    ucs_assert(((uintptr_t)a % UCS_SYS_CACHE_LINE_SIZE) == 0);
+    ucs_assert(((uintptr_t)b % UCS_SYS_CACHE_LINE_SIZE) == 0);
+    ucs_assert((cmp_size     % UCS_SYS_CACHE_LINE_SIZE) == 0);
+    ucs_assert((cmp_offset   % UCS_SYS_CACHE_LINE_SIZE) == 0);
 
-ucs_status_t ucg_plan_select(ucg_group_h group, const char* planner_name,
-                             const ucg_collective_params_t *params,
-                             ucg_plan_component_t **planc_p)
-{
-    ucg_groups_t *ctx = UCG_WORKER_TO_GROUPS_CTX(group->worker);
-    return ucg_plan_select_component(ctx->planners, ctx->num_planners,
-            planner_name, &group->params, params, planc_p);
+    return (0 == memcmp((uint8_t*)a + cmp_offset,
+                        (uint8_t*)b + cmp_offset,
+                        cmp_size));
 }
 
 UCS_PROFILE_FUNC(ucs_status_t, ucg_collective_create,
         (group, params, coll), ucg_group_h group,
         const ucg_collective_params_t *params, ucg_coll_h *coll)
 {
-    UCP_WORKER_THREAD_CS_ENTER_CONDITIONAL(group->worker);
-
-    /* check the recycling/cache for this collective */
     ucg_op_t *op;
     ucs_status_t status;
-    unsigned coll_mask = UCG_FLAG_MASK(params);
-    ucg_plan_t *plan = group->cache[coll_mask];
+
+    uint16_t modifiers               = params->type.modifiers;
+    unsigned coll_mask               = modifiers & UCG_GROUP_CACHE_MODIFIER_MASK;
+    ucg_plan_t *plan                 = group->cache[coll_mask];
+    unsigned cmp_bit_offset          = ucs_count_trailing_zero_bits(
+                                       UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_SEND);
+    enum ucg_group_cmp_mode cmp_mode = (enum ucg_group_cmp_mode)(modifiers >>
+                                                                 cmp_bit_offset);
+
+
+    /* check the recycling/cache for this collective */
     if (ucs_likely(plan != NULL)) {
-        ucs_list_for_each(op, &plan->op_head, list) {
-            if (!memcmp(&op->params, params, sizeof(*params))) {
+
+        UCG_GROUP_THREAD_CS_ENTER(plan)
+
+        switch (cmp_mode) {
+        case UCG_GROUP_CMP_MODE_FULL:
+            ucs_list_for_each(op, &plan->op_head, list) {
+                if (ucg_group_is_matching_op(UCG_GROUP_CMP_MODE_FULL,
+                                             &op->params, params)) {
+                    ucs_list_del(&op->list);
+                    UCG_GROUP_THREAD_CS_EXIT(plan);
+                    status = UCS_OK;
+                    goto op_found;
+                }
+            }
+            break;
+
+        case UCG_GROUP_CMP_MODE_SEND_ONLY:
+            ucs_list_for_each(op, &plan->op_head, list) {
+                if (ucg_group_is_matching_op(UCG_GROUP_CMP_MODE_SEND_ONLY,
+                                             &op->params, params)) {
+                    ucs_list_del(&op->list);
+                    UCG_GROUP_THREAD_CS_EXIT(plan);
+                    status = UCS_OK;
+                    goto op_found;
+                }
+            }
+            break;
+
+        case UCG_GROUP_CMP_MODE_RECV_ONLY:
+            ucs_list_for_each(op, &plan->op_head, list) {
+                if (ucg_group_is_matching_op(UCG_GROUP_CMP_MODE_RECV_ONLY,
+                                             &op->params, params)) {
+                    ucs_list_del(&op->list);
+                    UCG_GROUP_THREAD_CS_EXIT(plan);
+                    status = UCS_OK;
+                    goto op_found;
+                }
+            }
+            break;
+
+        case UCG_GROUP_CMP_MODE_BARRIER:
+            /* No need to look for a match - barrier is pre-calculated */
+            plan = group->barrier_cache;
+            if (ucs_likely(!ucs_list_is_empty(&plan->op_head))) {
+                op = ucs_list_extract_head(&plan->op_head, ucg_op_t, list);
+                UCG_GROUP_THREAD_CS_EXIT(plan);
                 status = UCS_OK;
                 goto op_found;
             }
+            break;
         }
 
+        UCG_GROUP_THREAD_CS_EXIT(plan);
+
         UCS_STATS_UPDATE_COUNTER(group->stats, UCG_GROUP_STAT_PLANS_USED, 1);
-        goto plan_found;
+    } else {
+        ucs_assert((modifiers & UCG_GROUP_COLLECTIVE_MODIFIER_BARRIER) == 0);
+        ucs_trace_req("ucg_collective_create PLAN: type=%x root=%"PRIx64,
+                      params->type.modifiers, (uint64_t)params->type.root);
+
+        /* create the actual plan for the collective operation */
+        status = ucg_group_plan(group, params, &plan);
+        if (status != UCS_OK) {
+            goto out;
+        }
+
+        group->cache[coll_mask] = plan;
+
+        UCS_STATS_UPDATE_COUNTER(group->stats, UCG_GROUP_STAT_PLANS_CREATED, 1);
     }
 
-    /* select which plan to use for this collective operation */
-    ucg_plan_component_t *planc; // TODO: replace NULL with config value
-    status = ucg_plan_select(group, NULL, params, &planc);
-    if (status != UCS_OK) {
-        goto out;
-    }
-
-    /* create the actual plan for the collective operation */
-    UCS_PROFILE_CODE("ucg_plan") {
-        ucs_trace_req("ucg_collective_create PLAN: planc=%s type=%x root=%lu",
-                &planc->name[0], params->type.modifiers, (uint64_t)params->type.root);
-        status = ucg_plan(planc, &params->type, group, &plan);
-    }
-    if (status != UCS_OK) {
-        goto out;
-    }
-
-    plan->planner           = planc;
-    plan->group             = group;
-    plan->type              = params->type;
-    plan->group_id          = group->group_id;
-    plan->group_size        = group->params.member_count;
-#ifdef HAVE_UCT_COLLECTIVES
-    plan->group_host_size   = group->worker->context->config.num_local_peers;
-#endif
-    group->cache[coll_mask] = plan;
-    ucs_list_head_init(&plan->op_head);
-    UCS_STATS_UPDATE_COUNTER(group->stats, UCG_GROUP_STAT_PLANS_CREATED, 1);
-
-plan_found:
     UCS_STATS_UPDATE_COUNTER(group->stats, UCG_GROUP_STAT_OPS_CREATED, 1);
+
     UCS_PROFILE_CODE("ucg_prepare") {
-        status = ucg_prepare(plan, params, &op);
+        status = plan->planner->component->prepare(plan, params, &op);
     }
     if (status != UCS_OK) {
         goto out;
     }
 
-    ucs_trace_req("ucg_collective_create OP: planc=%s "
-            "params={type=%u, root=%lu, send=[%p,%i,%lu,%p,%p], "
-            "recv=[%p,%i,%lu,%p,%p], cb=%p, op=%p}", &planc->name[0],
-            (unsigned)params->type.modifiers, (uint64_t)params->type.root,
-            params->send.buf, params->send.count, params->send.dt_len,
-            params->send.dt_ext, params->send.displs,
-            params->recv.buf, params->recv.count, params->recv.dt_len,
-            params->recv.dt_ext, params->recv.displs,
-            params->comp_cb, params->recv.op_ext);
+    ucs_trace_req("ucg_collective_create OP: planner=%s(%s) "
+                  "params={type=%u, root=%lu, send=[%p,%lu,%lu,%p,%p], "
+                  "recv=[%p,%lu,%lu,%p,%p], cb=%p(%p), op=%p}",
+                  plan->planner->name, plan->planner->component->name,
+                  (uint16_t)params->type.modifiers,
+                  (uint64_t)params->type.root, params->send.buf,
+                  params->send.count, params->send.dt_len,
+                  params->send.dt_ext, params->send.displs,
+                  params->recv.buf, params->recv.count, params->recv.dt_len,
+                  params->recv.dt_ext, params->recv.displs,
+                  params->comp_cb, params->recv_only.comp_cb,
+                  params->recv.op_ext);
 
-    ucs_list_add_head(&plan->op_head, &op->list);
-    memcpy(&op->params, params, sizeof(*params));
-    op->plan = plan;
+    if (ucs_unlikely(++group->cache_size >
+                     group->context->config.group_cache_size_thresh)) {
+        group->is_cache_cleanup_due = 1;
+    }
 
 op_found:
     *coll = op;
 
 out:
-    UCP_WORKER_THREAD_CS_EXIT_CONDITIONAL(group->worker);
+    UCG_GROUP_THREAD_CS_EXIT(group)
+
     return status;
 }
 
 ucs_status_t static UCS_F_ALWAYS_INLINE
-ucg_collective_trigger(ucg_group_h group, ucg_op_t *op, ucg_request_t **req)
+ucg_collective_trigger(ucg_group_h group, ucg_op_t *op, ucg_request_t *req)
 {
-    /* Barrier effect - all new collectives are pending */
-    if (ucs_unlikely(op->params.type.modifiers & UCG_GROUP_COLLECTIVE_MODIFIER_BARRIER)) {
-        ucs_assert(group->is_barrier_outstanding == 0);
-        group->is_barrier_outstanding = 1;
-    }
+    ucs_status_t ret;
 
     /* Start the first step of the collective operation */
-    ucs_status_t ret;
     UCS_PROFILE_CODE("ucg_trigger") {
-        ret = ucg_trigger(op, group->next_id++, req);
+        ret = op->trigger_f(op, ++group->next_coll_id, req);
     }
 
     if (ret != UCS_INPROGRESS) {
@@ -645,44 +478,50 @@ ucg_collective_trigger(ucg_group_h group, ucg_op_t *op, ucg_request_t **req)
     return ret;
 }
 
+ucs_status_t ucg_collective_acquire_barrier(ucg_group_h group)
+{
+    ucs_assert(group->is_barrier_outstanding == 0);
+    group->is_barrier_outstanding = 1;
+    return UCS_OK;
+}
+
 ucs_status_t ucg_collective_release_barrier(ucg_group_h group)
 {
-    ucs_assert(group->is_barrier_outstanding);
+    ucs_assert(group->is_barrier_outstanding == 1);
     group->is_barrier_outstanding = 0;
+
+    UCG_GROUP_THREAD_CS_ENTER(group)
+
     if (ucs_queue_is_empty(&group->pending)) {
         return UCS_OK;
     }
 
     ucs_status_t ret;
     do {
-        /* Move the operation from the pending queue back to the original one */
+        /* Start the next pending operation */
         ucg_op_t *op = (ucg_op_t*)ucs_queue_pull_non_empty(&group->pending);
-        ucg_request_t **req = op->pending_req;
-        ucs_list_add_head(&op->plan->op_head, &op->list);
-
-        /* Start this next pending operation */
-        ret = ucg_collective_trigger(group, op, req);
+        ret = ucg_collective_trigger(group, op, op->pending_req);
     } while ((!ucs_queue_is_empty(&group->pending)) &&
              (!group->is_barrier_outstanding) &&
              (ret == UCS_OK));
 
+    UCG_GROUP_THREAD_CS_EXIT(group)
+
     return ret;
 }
 
-ucs_status_t static UCS_F_ALWAYS_INLINE
-ucg_collective_start(ucg_coll_h coll, ucg_request_t **req)
+UCS_PROFILE_FUNC(ucs_status_t, ucg_collective_start, (coll, req),
+                 ucg_coll_h coll, ucg_request_t *req)
 {
     ucs_status_t ret;
     ucg_op_t *op = (ucg_op_t*)coll;
     ucg_group_h group = op->plan->group;
 
-    /* Since group was created - don't need UCP_CONTEXT_CHECK_FEATURE_FLAGS */
-    UCP_WORKER_THREAD_CS_ENTER_CONDITIONAL(group->worker);
+    ucs_trace_req("ucg_collective_start: op=%p req=%p", coll, req);
 
-    ucs_trace_req("ucg_collective_start: op=%p req=%p", coll, *req);
+    UCG_GROUP_THREAD_CS_ENTER(group)
 
     if (ucs_unlikely(group->is_barrier_outstanding)) {
-        ucs_list_del(&op->list);
         ucs_queue_push(&group->pending, &op->queue);
         op->pending_req = req;
         ret = UCS_INPROGRESS;
@@ -690,277 +529,25 @@ ucg_collective_start(ucg_coll_h coll, ucg_request_t **req)
         ret = ucg_collective_trigger(group, op, req);
     }
 
+    if (ucs_unlikely(group->is_cache_cleanup_due) && !UCS_STATUS_IS_ERR(ret)) {
+        ucg_group_cache_cleanup(group);
+    }
+
     UCS_STATS_UPDATE_COUNTER(group->stats, UCG_GROUP_STAT_OPS_USED, 1);
-    UCP_WORKER_THREAD_CS_EXIT_CONDITIONAL(group->worker);
+
+    UCG_GROUP_THREAD_CS_EXIT(group)
+
     return ret;
-}
-
-UCS_PROFILE_FUNC(ucs_status_ptr_t, ucg_collective_start_nb,
-                 (coll), ucg_coll_h coll)
-{
-    ucg_request_t *req = NULL;
-    ucs_status_ptr_t ret = UCS_STATUS_PTR(ucg_collective_start(coll, &req));
-    return UCS_PTR_IS_ERR(ret) ? ret : req;
-}
-
-UCS_PROFILE_FUNC(ucs_status_t, ucg_collective_start_nbr,
-                 (coll, request), ucg_coll_h coll, void *request)
-{
-    return ucg_collective_start(coll, (ucg_request_t**)&request);
 }
 
 void ucg_collective_destroy(ucg_coll_h coll)
 {
-    ucg_discard((ucg_op_t*)coll);
-}
+    ucg_op_t *op     = (ucg_op_t*)coll;
+    ucg_plan_t *plan = op->plan;
 
-static ucs_status_t ucg_worker_groups_init(ucp_worker_h worker,
-        unsigned *next_am_id, void *groups_ctx)
-{
-    ucg_groups_t *gctx  = (ucg_groups_t*)groups_ctx;
-    ucs_status_t status = ucg_plan_query(next_am_id, &gctx->planners, &gctx->num_planners);
-    if (status != UCS_OK) {
-        return status;
-    }
+    ucs_recursive_spin_lock(&plan->lock);
 
-    unsigned planner_idx;
-    size_t group_ctx_offset  = sizeof(struct ucg_group);
-    size_t global_ctx_offset = ucg_ctx_worker_offset + sizeof(ucg_groups_t);
-    for (planner_idx = 0; planner_idx < gctx->num_planners; planner_idx++) {
-        ucg_plan_desc_t* planner    = &gctx->planners[planner_idx];
-        ucg_plan_component_t* planc = planner->plan_component;
-        planc->global_ctx_offset    = global_ctx_offset;
-        global_ctx_offset          += planc->global_ctx_size;
-        planc->group_ctx_offset     = group_ctx_offset;
-        group_ctx_offset           += planc->per_group_ctx_size;
-    }
+    ucs_list_add_head(&plan->op_head, &op->list);
 
-    gctx->next_id             = 1; /* to ease debugging - first group ID is 1 */
-    gctx->iface_cnt           = 0;
-    gctx->total_planner_sizes = group_ctx_offset;
-#ifdef HAVE_UCT_COLLECTIVES
-    gctx->num_local_peers     = worker->context->config.num_local_peers;
-    gctx->my_local_peer_idx   = worker->context->config.my_local_peer_idx;
-#endif
-    ucs_list_head_init(&gctx->groups_head);
-    return UCS_OK;
-}
-
-static void ucg_worker_groups_cleanup(void *groups_ctx)
-{
-    ucg_groups_t *gctx = (ucg_groups_t*)groups_ctx;
-
-    ucg_group_h group, tmp;
-    if (!ucs_list_is_empty(&gctx->groups_head)) {
-        ucs_list_for_each_safe(group, tmp, &gctx->groups_head, list) {
-            ucg_group_destroy(group);
-        }
-    }
-
-    ucg_plan_release_list(gctx->planners, gctx->num_planners);
-}
-
-static ucs_status_t ucg_extend_ucp(const ucg_params_t *params,
-                                   const ucg_config_t *config,
-                                   ucg_context_h context_p)
-{
-    ucp_context_h ucp_context_p = context_p->super;
-
-#ifndef HAVE_UCP_EXTENSIONS
-    /* Since UCP doesn't support extensions (yet?) - we need to allocate... */
-    ucg_context_h ucg_context = ucs_calloc(1, sizeof(*ucg_context), "ucg context");
-    if (!ucg_context) {
-        return UCS_ERR_NO_MEMORY;
-    }
-
-    ucg_context->last_am_id = 0;
-    ucg_context->super = (ucp_context_h)context_p;
-    ucs_list_head_init(&(*context_p)->extensions);
-    ucg_context->worker_size = sizeof(ucp_worker_t) + sizeof(ucp_ep_config_t) *
-            ucs_min((ucg_context->super->num_tls + 1) *
-                    (ucg_context->super->num_tls + 1) *
-                    (ucg_context->super->num_tls),
-                    UINT8_MAX);
-    *context_p = ucg_context;
-#endif
-
-    size_t ctx_size = sizeof(ucg_groups_t);
-    ucg_plan_component_t *planner_iter;
-    ucs_list_for_each(planner_iter, &ucg_plan_components_list, list) {
-        ctx_size += planner_iter->global_ctx_size;
-    }
-
-    return ucp_extend(ucp_context_p, ctx_size, ucg_worker_groups_init,
-            ucg_worker_groups_cleanup, &ucg_ctx_worker_offset);
-}
-
-ucs_status_t ucg_init_version(unsigned api_major_version,
-                              unsigned api_minor_version,
-                              const ucg_params_t *params,
-                              const ucg_config_t *config,
-                              ucg_context_h *context_p)
-{
-    ucg_context_h ucg_context_p = ucs_malloc(sizeof(struct ucg_context),
-                                             "ucg_context");
-    if (!ucg_context_p) {
-        return UCS_ERR_NO_MEMORY;
-    }
-
-    ucs_status_t status = ucp_init_version(api_major_version, api_minor_version,
-                                           params, config, &ucg_context_p->super);
-    if (status != UCS_OK) {
-        goto ucg_init_version_ctx_cleanup;
-    }
-
-    status = ucg_extend_ucp(params, config, ucg_context_p);
-    if (status == UCS_OK) {
-        *context_p = ucg_context_p;
-        return UCS_OK;
-    }
-
-    ucp_cleanup(ucg_context_p->super);
-ucg_init_version_ctx_cleanup:
-    ucs_free(ucg_context_p);
-    return status;
-}
-
-ucs_status_t ucg_init(const ucg_params_t *params,
-                      const ucg_config_t *config,
-                      ucg_context_h *context_p)
-{
-    return ucg_init_version(UCG_API_MAJOR, UCG_API_MINOR, params, config,
-                            context_p);
-}
-
-void ucg_cleanup(ucg_context_h context_p)
-{
-    ucp_cleanup(context_p->super);
-}
-
-ucs_status_t ucg_context_query(ucg_context_h context_p,
-                               ucg_context_attr_t *attr)
-{
-    return ucp_context_query(context_p->super, attr);
-}
-
-
-void ucg_context_print_info(const ucg_context_h context, FILE *stream)
-{
-    ucp_context_print_info(context->super, stream);
-}
-
-
-ucs_status_t ucg_plan_connect(ucg_group_h group,
-                              ucg_group_member_index_t idx,
-                              enum ucg_plan_connect_flags flags,
-                              uct_ep_h *ep_p, const uct_iface_attr_t **ep_attr_p,
-                              uct_md_h *md_p, const uct_md_attr_t    **md_attr_p)
-{
-    int ret;
-    ucs_status_t status;
-    size_t remote_addr_len;
-    ucp_address_t *remote_addr = NULL;
-
-    /* Look-up the UCP endpoint based on the index */
-    ucp_ep_h ucp_ep;
-    khiter_t iter = kh_get(ucg_group_ep, &group->eps, idx);
-    if (iter != kh_end(&group->eps)) {
-        /* Use the cached connection */
-        ucp_ep = kh_value(&group->eps, iter);
-    } else {
-        /* fill-in UCP connection parameters */
-        status = group->params.resolve_address_f(group->params.cb_group_obj,
-                idx, &remote_addr, &remote_addr_len);
-        if (status != UCS_OK) {
-            ucs_error("failed to obtain a UCP endpoint from the external callback");
-            return status;
-        }
-
-        /* special case: connecting to a zero-length address means it's "debugging" */
-        if (ucs_unlikely(remote_addr_len == 0)) {
-            *ep_p = NULL;
-            return UCS_OK;
-        }
-
-        /* create an endpoint for communication with the remote member */
-        ucp_ep_params_t ep_params = {
-                .field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS,
-                .address = remote_addr
-        };
-        status = ucp_ep_create(group->worker, &ep_params, &ucp_ep);
-        group->params.release_address_f(remote_addr);
-        if (status != UCS_OK) {
-            return status;
-        }
-
-        /* Store this endpoint, for future reference */
-        iter = kh_put(ucg_group_ep, &group->eps, idx, &ret);
-        kh_value(&group->eps, iter) = ucp_ep;
-    }
-
-    /* Connect for point-to-point communication */
-    ucp_lane_index_t lane;
-am_retry:
-#ifdef HAVE_UCT_COLLECTIVES
-    if (flags & UCG_PLAN_CONNECT_FLAG_WANT_INCAST) {
-        lane = ucp_ep_get_incast_lane(ucp_ep);
-        if (ucs_unlikely(lane == UCP_NULL_LANE)) {
-            ucs_warn("No transports with native incast support were found,"
-                     " falling back to P2P transports (slower)");
-            return UCS_ERR_UNREACHABLE;
-        }
-        *ep_p = ucp_ep_get_incast_uct_ep(ucp_ep);
-    } else if (flags & UCG_PLAN_CONNECT_FLAG_WANT_BCAST) {
-        lane = ucp_ep_get_bcast_lane(ucp_ep);
-        if (ucs_unlikely(lane == UCP_NULL_LANE)) {
-            ucs_warn("No transports with native broadcast support were found,"
-                     " falling back to P2P transports (slower)");
-            return UCS_ERR_UNREACHABLE;
-        }
-        *ep_p = ucp_ep_get_bcast_uct_ep(ucp_ep);
-    } else
-#endif /* HAVE_UCT_COLLECTIVES */
-    {
-        lane  = ucp_ep_get_am_lane(ucp_ep);
-        *ep_p = ucp_ep_get_am_uct_ep(ucp_ep);
-    }
-
-    if (*ep_p == NULL) {
-        status = ucp_wireup_connect_remote(ucp_ep, lane);
-        if (status != UCS_OK) {
-            return status;
-        }
-        goto am_retry; /* Just to obtain the right lane */
-    }
-
-    if (ucp_proxy_ep_test(*ep_p)) {
-        ucp_proxy_ep_t *proxy_ep = ucs_derived_of(*ep_p, ucp_proxy_ep_t);
-        *ep_p = proxy_ep->uct_ep;
-        ucs_assert(*ep_p != NULL);
-    }
-
-    ucs_assert((*ep_p)->iface != NULL);
-    if ((*ep_p)->iface->ops.ep_am_short ==
-            (typeof((*ep_p)->iface->ops.ep_am_short))
-            ucs_empty_function_return_no_resource) {
-        ucp_worker_progress(group->worker);
-        goto am_retry;
-    }
-
-    /* Register interfaces to be progressed in future calls */
-    ucg_groups_t *gctx = UCG_WORKER_TO_GROUPS_CTX(group->worker);
-    UCG_GROUP_PROGRESS_ADD((*ep_p)->iface, gctx);
-    UCG_GROUP_PROGRESS_ADD((*ep_p)->iface, group);
-
-    *md_p      = ucp_ep_md(ucp_ep, lane);
-    *md_attr_p = ucp_ep_md_attr(ucp_ep, lane);
-    *ep_attr_p = ucp_ep_get_iface_attr(ucp_ep, lane);
-
-    return UCS_OK;
-}
-
-ucs_status_t ucg_plan_query_resources(ucg_group_h group,
-                                      ucg_plan_resources_t **resources)
-{
-    return UCS_OK;
+    ucs_recursive_spin_unlock(&plan->lock);
 }

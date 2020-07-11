@@ -24,27 +24,31 @@ ucs_status_t ucg_builtin_recursive_create(ucg_builtin_group_ctx_t *ctx,
         const ucg_collective_type_t *coll_type,
         ucg_builtin_plan_t **plan_p)
 {
-    unsigned ppn = 0;
-    unsigned host_up_cnt = 0;
-    unsigned host_down_cnt = 0;
-    ucg_group_member_index_t my_index = 0;
-    ucg_group_member_index_t host_up[UCG_BUILTIN_TREE_MAX_RADIX] = {0};
-    ucg_group_member_index_t host_down[UCG_BUILTIN_TREE_MAX_RADIX] = {0};
+    unsigned ppn                                = 0;
+    unsigned host_up_cnt                        = 0;
+    unsigned host_down_cnt                      = 0;
+    ucg_group_member_index_t my_index           = 0;
     enum ucg_group_member_distance master_phase = UCG_GROUP_MEMBER_DISTANCE_NET;
+
+    ucg_group_member_index_t host_up[UCG_BUILTIN_TREE_MAX_RADIX]   = {0};
+    ucg_group_member_index_t host_down[UCG_BUILTIN_TREE_MAX_RADIX] = {0};
+
     ucg_builtin_plan_topology_t temp_topology = *topology;
-    temp_topology.type = UCG_PLAN_TREE_FANIN;
-    ucg_builtin_tree_params_t tree_params = {
-        .group_params = group_params,
-        .coll_type = coll_type,
-        .topology = &temp_topology,
-        .config = &config->tree,
-        .root = 0,
-        .ctx = ctx
+    temp_topology.type                        = UCG_PLAN_TREE_FANIN;
+    ucg_builtin_tree_params_t tree_params     = {
+            .group_params = group_params,
+            .coll_type    = coll_type,
+            .topology     = &temp_topology,
+            .config       = &config->tree,
+            .root         = 0,
+            .ctx          = ctx
     };
 
     /* Find who's above and who's below */
     ucs_status_t status = ucg_builtin_tree_add_intra(&tree_params, &my_index,
-            &ppn, host_up, &host_up_cnt, host_down, &host_down_cnt, &master_phase);
+                                                     &ppn, host_up, &host_up_cnt,
+                                                     host_down, &host_down_cnt,
+                                                     &master_phase);
     if (ucs_unlikely(status != UCS_OK)) {
         return status;
     }
@@ -128,9 +132,9 @@ ucs_status_t ucg_builtin_recursive_create(ucg_builtin_group_ctx_t *ctx,
 
     if (host_down_cnt || host_up_cnt) {
         /* Fill the first steps with the fanin stage */
-        status = ucg_builtin_tree_connect(recursive, NULL, &tree_params, 0,
-                next_ep, host_up, host_up_cnt, NULL, 0, NULL, 0,
-                host_down, host_down_cnt);
+        status = ucg_builtin_tree_connect(recursive, NULL, &tree_params, 1, ppn,
+                                          next_ep, host_up, host_up_cnt, NULL,
+                                          0, NULL, 0, host_down, host_down_cnt);
         if (status != UCS_OK) {
             goto recursive_fail;
         }
@@ -147,8 +151,8 @@ ucs_status_t ucg_builtin_recursive_create(ucg_builtin_group_ctx_t *ctx,
         alloc_phases += step_idx;
     } else {
         /* Calculate the peers for each step */
-        for (step_idx = phase - &recursive->phss[0], step_size = ppn;
-             ((step_idx < alloc_phases) && (status == UCS_OK));
+        for (step_idx = 1 + phase - &recursive->phss[0], step_size = ppn;
+             ((step_idx <= alloc_phases) && (status == UCS_OK));
              step_idx++, phase++, recursive->phs_cnt++, step_size *= factor) {
 
             unsigned step_base = my_index - (my_index % (step_size * factor));
@@ -197,8 +201,9 @@ ucs_status_t ucg_builtin_recursive_create(ucg_builtin_group_ctx_t *ctx,
         /* Fill the first steps with the fanout stage */
         temp_topology.type = UCG_PLAN_TREE_FANOUT;
         status = ucg_builtin_tree_connect(recursive, NULL, &tree_params,
-                alloc_phases, next_ep, host_up, host_up_cnt, NULL, 0, NULL,
-                0, host_down, host_down_cnt);
+                                          alloc_phases, ppn, next_ep, host_up,
+                                          host_up_cnt, NULL, 0, NULL, 0,
+                                          host_down, host_down_cnt);
         if (status != UCS_OK) {
             goto recursive_fail;
         }
@@ -216,4 +221,11 @@ ucs_status_t ucg_builtin_recursive_create(ucg_builtin_group_ctx_t *ctx,
 recursive_fail:
     ucs_free(recursive);
     return status;
+}
+
+ucs_status_t ucg_builtin_recursive_recover(ucg_builtin_plan_t *original,
+                                           ucg_builtin_plan_t *fault_perspective,
+                                           ucg_group_member_index_t fault_index)
+{
+    return UCS_ERR_NOT_IMPLEMENTED;
 }
