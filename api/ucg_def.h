@@ -35,6 +35,23 @@
 typedef struct ucg_context               *ucg_context_h;
 
 
+/**
+ * @ingroup UCG_CONFIG
+ * @brief UCG configuration descriptor
+ *
+ * This descriptor defines the configuration for @ref ucg_context_h
+ * "UCG application context". The configuration is loaded from the run-time
+ * environment (using configuration files of environment variables)
+ * using @ref ucg_config_read "ucg_config_read" routine and can be printed
+ * using @ref ucg_config_print "ucg_config_print" routine. In addition,
+ * application is responsible to release the descriptor using
+ * @ref ucg_config_release "ucg_config_release" routine.
+ *
+ * @todo This structure will be modified through a dedicated function.
+ */
+typedef struct ucg_config                ucg_config_t;
+
+
  /**
   * @ingroup UCG_GROUP
   * @brief UCG Group
@@ -59,6 +76,17 @@ typedef struct ucg_group                *ucg_group_h;
   * requires no additional parameters.
   */
 typedef void                            *ucg_coll_h;
+
+
+/**
+ * @ingroup UCG_GROUP
+ * @brief UCG group identifier.
+ *
+ * Each UCG group requires a unique identifier, to detect which messages are
+ * part of the collective operations on it. Disjoint groups (with no members in
+ * common) could have identical group identifiers.
+ */
+typedef uint16_t                         ucg_group_id_t;
 
 
 /**

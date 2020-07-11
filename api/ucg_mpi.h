@@ -21,8 +21,10 @@ enum ucg_predefined {
     UCG_PRIMITIVE_BARRIER,
     UCG_PRIMITIVE_REDUCE,
     UCG_PRIMITIVE_GATHER,
+    UCG_PRIMITIVE_GATHERV,
     UCG_PRIMITIVE_BCAST,
     UCG_PRIMITIVE_SCATTER,
+    UCG_PRIMITIVE_SCATTERV,
     UCG_PRIMITIVE_ALLREDUCE,
     UCG_PRIMITIVE_ALLTOALL,
     UCG_PRIMITIVE_REDUCE_SCATTER,
@@ -38,17 +40,25 @@ static enum ucg_collective_modifiers ucg_predefined_modifiers[] = {
                                          UCG_GROUP_COLLECTIVE_MODIFIER_BARRIER,
     [UCG_PRIMITIVE_REDUCE]             = UCG_GROUP_COLLECTIVE_MODIFIER_AGGREGATE |
                                          UCG_GROUP_COLLECTIVE_MODIFIER_SINGLE_DESTINATION,
-    [UCG_PRIMITIVE_GATHER]             = UCG_GROUP_COLLECTIVE_MODIFIER_SINGLE_DESTINATION,
+    [UCG_PRIMITIVE_GATHER]             = UCG_GROUP_COLLECTIVE_MODIFIER_CONCATENATE |
+                                         UCG_GROUP_COLLECTIVE_MODIFIER_SINGLE_DESTINATION,
+    [UCG_PRIMITIVE_GATHERV]            = UCG_GROUP_COLLECTIVE_MODIFIER_CONCATENATE |
+                                         UCG_GROUP_COLLECTIVE_MODIFIER_SINGLE_DESTINATION |
+                                         UCG_GROUP_COLLECTIVE_MODIFIER_VARIABLE_LENGTH,
     [UCG_PRIMITIVE_BCAST]              = UCG_GROUP_COLLECTIVE_MODIFIER_BROADCAST |
                                          UCG_GROUP_COLLECTIVE_MODIFIER_SINGLE_SOURCE,
     [UCG_PRIMITIVE_SCATTER]            = UCG_GROUP_COLLECTIVE_MODIFIER_SINGLE_SOURCE,
+    [UCG_PRIMITIVE_SCATTERV]           = UCG_GROUP_COLLECTIVE_MODIFIER_SINGLE_SOURCE |
+                                         UCG_GROUP_COLLECTIVE_MODIFIER_VARIABLE_LENGTH,
     [UCG_PRIMITIVE_ALLREDUCE]          = UCG_GROUP_COLLECTIVE_MODIFIER_AGGREGATE |
                                          UCG_GROUP_COLLECTIVE_MODIFIER_BROADCAST,
     [UCG_PRIMITIVE_ALLTOALL]           = 0,
     [UCG_PRIMITIVE_REDUCE_SCATTER]     = UCG_GROUP_COLLECTIVE_MODIFIER_AGGREGATE |
                                          UCG_GROUP_COLLECTIVE_MODIFIER_SINGLE_SOURCE,
-    [UCG_PRIMITIVE_ALLGATHER]          = UCG_GROUP_COLLECTIVE_MODIFIER_BROADCAST,
-    [UCG_PRIMITIVE_ALLGATHERV]         = UCG_GROUP_COLLECTIVE_MODIFIER_BROADCAST |
+    [UCG_PRIMITIVE_ALLGATHER]          = UCG_GROUP_COLLECTIVE_MODIFIER_CONCATENATE |
+                                         UCG_GROUP_COLLECTIVE_MODIFIER_BROADCAST,
+    [UCG_PRIMITIVE_ALLGATHERV]         = UCG_GROUP_COLLECTIVE_MODIFIER_CONCATENATE |
+                                         UCG_GROUP_COLLECTIVE_MODIFIER_BROADCAST |
                                          UCG_GROUP_COLLECTIVE_MODIFIER_VARIABLE_LENGTH,
     [UCG_PRIMITIVE_ALLTOALLW]          = UCG_GROUP_COLLECTIVE_MODIFIER_VARIABLE_LENGTH |
                                          UCG_GROUP_COLLECTIVE_MODIFIER_VARIABLE_DATATYPE,
@@ -80,8 +90,8 @@ static enum ucg_collective_modifiers ucg_predefined_modifiers[] = {
 
 #define UCG_COLL_INIT_FUNC(_lname, _uname, _stype, _sargs, _rtype, _rargs, ...)\
 static UCS_F_ALWAYS_INLINE ucs_status_t ucg_coll_##_lname##_init(__VA_ARGS__,  \
-        ucg_group_h group, ucg_collective_callback_t cb, void *op,             \
-        ucg_group_member_index_t root, unsigned modifiers, ucg_coll_h *coll_p) \
+        ucg_collective_callback_t cb, void *op, ucg_group_member_index_t root, \
+        unsigned modifiers, ucg_group_h group, ucg_coll_h *coll_p)             \
 {                                                                              \
     enum ucg_collective_modifiers flags = modifiers |                          \
         ucg_predefined_modifiers[UCG_PRIMITIVE_##_uname];                      \
@@ -96,7 +106,7 @@ static UCS_F_ALWAYS_INLINE ucs_status_t ucg_coll_##_lname##_init(__VA_ARGS__,  \
             .recv = {                                                          \
                     UCG_COLL_PARAMS_BUF##_rtype _rargs                         \
             },                                                                 \
-            .comp_cb        = cb                                               \
+            .comp_cb = cb                                                      \
     };                                                                         \
     return ucg_collective_create(group, &params, coll_p);                      \
 }
@@ -115,37 +125,42 @@ UCG_COLL_INIT_FUNC(_lname, _uname,                                    \
                    const void *sbuf, int scount, size_t len_sdtype, void *mpi_sdtype,\
                          void *rbuf, int rcount, size_t len_rdtype, void *mpi_rdtype)
 
-
 #define UCG_COLL_INIT_FUNC_SR1_RVN(_lname, _uname)                              \
 UCG_COLL_INIT_FUNC(_lname, _uname,                                              \
-                   _R, ((char*)sbuf, scount,  len_sdtype,  mpi_sdtype),         \
+                   _R, ((char*)sbuf, scount,  len_sdtype, mpi_sdtype),          \
                    _V, (       rbuf, rcounts, len_rdtype, mpi_rdtype, rdispls), \
-                   const void *sbuf, void *rbuf,                                \
-                   int  scount,  size_t len_sdtype, void *mpi_sdtype,           \
-                   int *rcounts, size_t len_rdtype,                             \
-                   void *mpi_rdtype, int *rdispls)
+                   const void *sbuf,       int  scount,                      size_t len_sdtype, void *mpi_sdtype, \
+                         void *rbuf, const int *rcounts, const int *rdispls, size_t len_rdtype, void *mpi_rdtype)
+
+#define UCG_COLL_INIT_FUNC_SVN_RR1(_lname, _uname)                              \
+UCG_COLL_INIT_FUNC(_lname, _uname,                                              \
+                   _V, ((char*)sbuf, scounts, len_sdtype, mpi_sdtype, sdispls), \
+                   _R, (       rbuf, rcount,  len_rdtype, mpi_rdtype),          \
+                   const void *sbuf, const int *scounts, const int *sdispls, size_t len_sdtype, void *mpi_sdtype, \
+                         void *rbuf,       int  rcount,                      size_t len_rdtype, void *mpi_rdtype)
 
 #define UCG_COLL_INIT_FUNC_SWN_RWN(_lname, _uname)                                \
 UCG_COLL_INIT_FUNC(_lname, _uname,                                                \
                    _W, ((char*)sbuf, scounts, len_sdtypes, mpi_sdtypes, sdispls), \
                    _W, (       rbuf, rcounts, len_rdtypes, mpi_rdtypes, rdispls), \
-                   const void *sbuf, void *rbuf, int *scounts,                    \
-                   size_t *len_sdtypes, void **mpi_sdtypes, int *sdispls,         \
-                   int *rcounts, size_t *len_rdtypes, void **mpi_rdtypes,         \
-                   int *rdispls)
+                   const void *sbuf, int *scounts, int *sdispls, size_t *len_sdtypes, void **mpi_sdtypes, \
+                         void *rbuf, int *rcounts, int *rdispls, size_t *len_rdtypes, void **mpi_rdtypes)
 
 
-UCG_COLL_INIT_FUNC_SR1_RR1(allreduce,          ALLREDUCE)
+UCG_COLL_INIT_FUNC(barrier, BARRIER, _R, (0, 0, 0, 0), _R, (0, 0, 0, 0), int ign)
 UCG_COLL_INIT_FUNC_SR1_RR1(reduce,             REDUCE)
-UCG_COLL_INIT_FUNC_SR1_RR1(bcast,              BCAST)
 UCG_COLL_INIT_FUNC_SR1_RRN(gather,             GATHER)
+UCG_COLL_INIT_FUNC_SR1_RVN(gatherv,            GATHERV)
+UCG_COLL_INIT_FUNC_SR1_RR1(bcast,              BCAST)
 UCG_COLL_INIT_FUNC_SR1_RRN(scatter,            SCATTER)
+UCG_COLL_INIT_FUNC_SVN_RR1(scatterv,           SCATTERV)
+UCG_COLL_INIT_FUNC_SR1_RR1(allreduce,          ALLREDUCE)
+UCG_COLL_INIT_FUNC_SR1_RRN(alltoall,           ALLTOALL)
+/* Not supported yet: REDUCE_SCATTER */
 UCG_COLL_INIT_FUNC_SR1_RRN(allgather,          ALLGATHER)
 UCG_COLL_INIT_FUNC_SR1_RVN(allgatherv,         ALLGATHERV)
-UCG_COLL_INIT_FUNC_SR1_RRN(alltoall,           ALLTOALL)
 UCG_COLL_INIT_FUNC_SWN_RWN(alltoallw,          ALLTOALLW)
 UCG_COLL_INIT_FUNC_SWN_RWN(neighbor_alltoallw, NEIGHBOR_ALLTOALLW)
-UCG_COLL_INIT_FUNC(barrier, BARRIER, _R, (0, 0, 0, 0), _R, (0, 0, 0, 0), int ign)
 
 END_C_DECLS
 

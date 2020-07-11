@@ -4,6 +4,7 @@
  */
 
 #include "ucg_plan.h"
+#include "ucg_group.h"
 
 #include <ucg/api/ucg.h>
 #include <ucs/config/parser.h>
@@ -71,7 +72,7 @@ err_free_bundle:
     return status;
 }
 
-ucs_status_t ucg_plan_query(unsigned *next_am_id, ucg_plan_desc_t **resources_p, unsigned *nums_p)
+ucs_status_t ucg_plan_query(ucg_plan_desc_t **desc_p, unsigned *num_desc_p)
 {
     UCS_MODULE_FRAMEWORK_DECLARE(ucg);
     ucg_plan_desc_t *resources, *planners, *tmp;
@@ -85,17 +86,13 @@ ucs_status_t ucg_plan_query(unsigned *next_am_id, ucg_plan_desc_t **resources_p,
     nums = 0;
 
     ucs_list_for_each(planc, &ucg_plan_components_list, list) {
-        planc->allocated_am_id = (*next_am_id)++;
-        status = planc->query(UCG_API_VERSION, planc->allocated_am_id,
-                &planners, &num_plans);
+        status = planc->query(&planners, &num_plans);
         if (status != UCS_OK) {
-            ucs_debug("Failed to query %s* resources: %s", planc->name,
-                      ucs_status_string(status));
+            ucs_debug("Failed to query planner %s: %m", planc->name);
             continue;
         }
 
         if (num_plans == 0) {
-            ucs_free(planners);
             continue;
         }
 
@@ -129,8 +126,8 @@ ucs_status_t ucg_plan_query(unsigned *next_am_id, ucg_plan_desc_t **resources_p,
         ucs_free(planners);
     }
 
-    *resources_p = resources;
-    *nums_p = nums;
+    *desc_p     = resources;
+    *num_desc_p = nums;
     return UCS_OK;
 
 err:
@@ -138,11 +135,11 @@ err:
     return status;
 }
 
-void ucg_plan_release_list(ucg_plan_desc_t *resources, unsigned resource_cnt)
+void ucg_plan_release_list(ucg_plan_desc_t *desc, unsigned desc_cnt)
 {
     unsigned i;
-    for (i = 0; i < resource_cnt; i++) {
-        ucg_plan_desc_t *plan_desc = &resources[i];
+    for (i = 0; i < desc_cnt; i++) {
+        ucg_plan_desc_t *plan_desc = &desc[i];
         ucg_config_bundle_t *bundle =
                 ucs_container_of(plan_desc->plan_component->plan_config,
                         ucg_config_bundle_t, data);
@@ -152,7 +149,7 @@ void ucg_plan_release_list(ucg_plan_desc_t *resources, unsigned resource_cnt)
         ucs_free(bundle);
     }
 
-    ucs_free(resources);
+    ucs_free(desc);
 }
 
 ucs_status_t ucg_plan_single(ucg_plan_component_t *planc,
@@ -177,16 +174,14 @@ ucs_status_t ucg_plan_single(ucg_plan_component_t *planc,
 
 ucs_status_t ucg_plan_select_component(ucg_plan_desc_t *planners,
                                        unsigned num_planners,
-                                       const char* planner_name,
+                                       ucs_config_names_array_t* config_planners,
                                        const ucg_group_params_t *group_params,
                                        const ucg_collective_params_t *coll_params,
-                                       ucg_plan_component_t **planc_p)
+                                       ucg_plan_component_t **planc_p,
+                                       size_t *planc_offset_p)
 {
-    if (planner_name && strcmp(planner_name, planners[0].plan_name)) {
-        ucs_error("Unknown planner component name: \"%s\"", planner_name);
-        return UCS_ERR_INVALID_PARAM;
-    }
-
-    *planc_p = planners[0].plan_component;
+    // TODO: use the configured values
+    *planc_p        = planners[0].plan_component;
+    *planc_offset_p = sizeof(ucg_group_t);
     return UCS_OK;
 }

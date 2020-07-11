@@ -3,6 +3,20 @@
 # See file LICENSE for terms.
 #
 
+     #
+     # Enable fault-tolerance
+     #
+     AC_ARG_ENABLE([fault-tolerance],
+         AS_HELP_STRING([--enable-fault-tolerance],
+                        [Enable fault-tolerance, default: NO]),
+         [],
+         [enable_fault_tolerance=no])
+     AS_IF([test "x$enable_fault_tolerance" = xyes],
+        [AS_MESSAGE([enabling with fault-tolerance])
+         AC_DEFINE([ENABLE_FAULT_TOLERANCE], [1], [Enable fault-tolerance])],
+        [:]
+       )
+
 
 ucg_modules=":builtin"
 m4_include([src/ucg/base/configure.m4])

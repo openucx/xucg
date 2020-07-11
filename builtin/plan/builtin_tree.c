@@ -48,6 +48,7 @@ static inline ucs_status_t ucg_builtin_tree_connect_phase(ucg_builtin_plan_phase
             /* For some methods, e.g. REDUCE_TERMINAL, the peer is the message
              * source and not the destination, so we need to switch to "loopback" */
             if (((coll_flags & UCG_PLAN_CONNECT_FLAG_WANT_INCAST) &&
+                 (method != UCG_PLAN_METHOD_SEND_TO_SM_ROOT) &&
                  (method != UCG_PLAN_METHOD_SEND_TERMINAL)) ||
                 ((coll_flags & UCG_PLAN_CONNECT_FLAG_WANT_BCAST) &&
                  (method != UCG_PLAN_METHOD_RECV_TERMINAL))) {
@@ -58,11 +59,18 @@ static inline ucs_status_t ucg_builtin_tree_connect_phase(ucg_builtin_plan_phase
 
         ucs_status_t status = ucg_builtin_single_connection_phase(params->ctx,
                 peer, step_index, method, coll_flags, phase, is_mock);
-        if ((status == UCS_OK) || !coll_flags) {
+
+#if ENABLE_DEBUG_DATA || ENABLE_FAULT_TOLERANCE
+        if (status == UCS_OK) {
+            phase->indexes = UCS_ALLOC_CHECK(sizeof(*peers), "tree root index");
+            phase->indexes[0] = peer;
+        }
+#endif
+
+        if ((status != UCS_ERR_UNREACHABLE) || !coll_flags) {
             return status;
         }
     }
-
 
     if (peer_cnt > 1) {
         phase->multi_eps = *eps;
@@ -119,13 +127,19 @@ ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
     case UCG_PLAN_TREE_FANIN_FANOUT:
         /* Create a phase for inter-node communication ("up the tree") */
         if (host_down_cnt) {
-            fanin_method =  (mod & UCG_GROUP_COLLECTIVE_MODIFIER_AGGREGATE) ?
-                    (host_up_cnt ? UCG_PLAN_METHOD_REDUCE_WAYPOINT :
-                                   UCG_PLAN_METHOD_REDUCE_TERMINAL):
-                    (host_up_cnt ? UCG_PLAN_METHOD_GATHER_WAYPOINT :
-                                   UCG_PLAN_METHOD_RECV_TERMINAL);
+            if (mod & UCG_GROUP_COLLECTIVE_MODIFIER_AGGREGATE) {
+                fanin_method = host_up_cnt ? UCG_PLAN_METHOD_REDUCE_WAYPOINT :
+                                             UCG_PLAN_METHOD_REDUCE_TERMINAL;
+            } else if (mod & UCG_GROUP_COLLECTIVE_MODIFIER_CONCATENATE) {
+                fanin_method = host_up_cnt ? UCG_PLAN_METHOD_GATHER_WAYPOINT :
+                                             UCG_PLAN_METHOD_GATHER_TERMINAL;
+            } else {
+                ucs_assert(host_up_cnt == 0);
+                fanin_method = UCG_PLAN_METHOD_RECV_TERMINAL;
+            }
         } else {
-            fanin_method  = UCG_PLAN_METHOD_SEND_TERMINAL;
+            fanin_method = UCG_PLAN_METHOD_SEND_TO_SM_ROOT;
+            // TODO: what if SM transports are not included/supported?
         }
 
         if (host_up_cnt + host_down_cnt) {
@@ -144,13 +158,18 @@ ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
 
         /* Create a phase for intra-node communication ("up the tree") */
         if (net_down_cnt) {
-            fanin_method = (mod & UCG_GROUP_COLLECTIVE_MODIFIER_AGGREGATE) ?
-                    (net_up_cnt ? UCG_PLAN_METHOD_REDUCE_WAYPOINT :
-                                  UCG_PLAN_METHOD_REDUCE_TERMINAL):
-                    (net_up_cnt ? UCG_PLAN_METHOD_GATHER_WAYPOINT :
-                                  UCG_PLAN_METHOD_RECV_TERMINAL);
+            if (mod & UCG_GROUP_COLLECTIVE_MODIFIER_AGGREGATE) {
+                fanin_method = net_up_cnt ? UCG_PLAN_METHOD_REDUCE_WAYPOINT :
+                                            UCG_PLAN_METHOD_REDUCE_TERMINAL;
+            } else if (mod & UCG_GROUP_COLLECTIVE_MODIFIER_CONCATENATE) {
+                fanin_method = net_up_cnt ? UCG_PLAN_METHOD_GATHER_WAYPOINT :
+                                            UCG_PLAN_METHOD_GATHER_TERMINAL;
+            } else {
+                ucs_assert(host_up_cnt == 0);
+                fanin_method = UCG_PLAN_METHOD_RECV_TERMINAL;
+            }
         } else {
-            fanin_method  = UCG_PLAN_METHOD_SEND_TERMINAL;
+            fanin_method = UCG_PLAN_METHOD_SEND_TERMINAL;
         }
 
         if (net_up_cnt + net_down_cnt) {
@@ -268,7 +287,7 @@ ucs_status_t ucg_builtin_tree_add_intra(const ucg_builtin_tree_params_t *params,
         enum ucg_group_member_distance next_distance =
                 params->group_params->distance[member_idx];
         ucs_assert(next_distance < UCG_GROUP_MEMBER_DISTANCE_LAST);
-        if (next_distance <= UCG_GROUP_MEMBER_DISTANCE_HOST) {
+        if ((next_distance <= UCG_GROUP_MEMBER_DISTANCE_HOST) && (ppn != NULL)) {
             (*ppn)++; // TODO: fix support for "non-full-nodes" allocation...
             if (ucs_unlikely(next_distance == UCG_GROUP_MEMBER_DISTANCE_SELF)) {
                 ucs_assert(member_idx == params->group_params->member_index);
@@ -501,7 +520,7 @@ static ucs_status_t ucg_builtin_tree_build(const ucg_builtin_tree_params_t *para
     }
 
     /* fill in the tree phases while establishing the connections */
-    return ucg_builtin_tree_connect(tree, root, params, 0,
+    return ucg_builtin_tree_connect(tree, root, params, 1,
             (uct_ep_h*)(&tree->phss[MAX_PHASES]),
             host_up, host_up_cnt, net_up, net_up_cnt,
             net_down, net_down_cnt, host_down, host_down_cnt);

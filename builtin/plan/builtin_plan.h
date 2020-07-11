@@ -27,8 +27,10 @@ typedef struct ucg_builtin_plan_topology {
 
 enum ucg_builtin_plan_method_type {
     UCG_PLAN_METHOD_SEND_TERMINAL,     /* Send the message(s), nothing fancy */
+    UCG_PLAN_METHOD_SEND_TO_SM_ROOT,   /* Send into a shared buffer on root */
     UCG_PLAN_METHOD_RECV_TERMINAL,     /* Final stop for incoming messages */
     UCG_PLAN_METHOD_BCAST_WAYPOINT,    /* receive and send on to all peers */
+    UCG_PLAN_METHOD_GATHER_TERMINAL,   /* gather from all peers in the map */
     UCG_PLAN_METHOD_GATHER_WAYPOINT,   /* gather from all peers, and pass on */
     UCG_PLAN_METHOD_SCATTER_TERMINAL,  /* scatter to all peers in the map */
     UCG_PLAN_METHOD_SCATTER_WAYPOINT,  /* scatter and send "downwards" */
@@ -55,12 +57,6 @@ typedef struct ucg_builtin_plan_phase {
 
     /* From here on - only used during step creation ("control path") */
     enum ucg_builtin_plan_method_type method;        /* how to apply this map */
-    size_t                            max_short_one; /* max single short message */
-    size_t                            max_short_max; /* max length to use short */
-    size_t                            max_bcopy_one; /* max single bcopy message */
-    size_t                            max_bcopy_max; /* max length to use bcopy */
-    size_t                            max_zcopy_one; /* max single zcopy message */
-
     uct_md_h                          md;            /* memory (registration) domain */
     const uct_md_attr_t              *md_attr;       /* memory domain attributes */
     const uct_iface_attr_t           *iface_attr;    /* interface attributes */
@@ -102,6 +98,7 @@ typedef struct ucg_builtin_tree_config {
     unsigned radix;
 #define UCG_BUILTIN_TREE_MAX_RADIX (128)
     unsigned sock_thresh;
+    ucg_group_member_index_t my_index;
 } ucg_builtin_tree_config_t;
 
 extern ucs_config_field_t ucg_builtin_tree_config_table[];

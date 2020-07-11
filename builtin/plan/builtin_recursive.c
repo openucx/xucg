@@ -128,7 +128,7 @@ ucs_status_t ucg_builtin_recursive_create(ucg_builtin_group_ctx_t *ctx,
 
     if (host_down_cnt || host_up_cnt) {
         /* Fill the first steps with the fanin stage */
-        status = ucg_builtin_tree_connect(recursive, NULL, &tree_params, 0,
+        status = ucg_builtin_tree_connect(recursive, NULL, &tree_params, 1,
                 next_ep, host_up, host_up_cnt, NULL, 0, NULL, 0,
                 host_down, host_down_cnt);
         if (status != UCS_OK) {
@@ -147,7 +147,7 @@ ucs_status_t ucg_builtin_recursive_create(ucg_builtin_group_ctx_t *ctx,
         alloc_phases += step_idx;
     } else {
         /* Calculate the peers for each step */
-        for (step_idx = phase - &recursive->phss[0], step_size = ppn;
+        for (step_idx = 1 + phase - &recursive->phss[0], step_size = ppn;
              ((step_idx < alloc_phases) && (status == UCS_OK));
              step_idx++, phase++, recursive->phs_cnt++, step_size *= factor) {
 
@@ -216,4 +216,11 @@ ucs_status_t ucg_builtin_recursive_create(ucg_builtin_group_ctx_t *ctx,
 recursive_fail:
     ucs_free(recursive);
     return status;
+}
+
+ucs_status_t ucg_builtin_recursive_recover(ucg_builtin_plan_t *original,
+                                           ucg_builtin_plan_t *fault_perspective,
+                                           ucg_group_member_index_t fault_index)
+{
+    return UCS_ERR_NOT_IMPLEMENTED;
 }

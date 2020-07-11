@@ -16,7 +16,6 @@ libucg_builtin_la_SOURCES = \
 	builtin.c \
 	ops/builtin_pack.c \
 	ops/builtin_data.c \
-	ops/builtin_comp.c \
 	ops/builtin_control.c \
 	plan/builtin_tree.c \
 	plan/builtin_neighbor.c \
