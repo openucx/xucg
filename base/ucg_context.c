@@ -37,7 +37,7 @@ UCS_CONFIG_REGISTER_TABLE(ucg_config_table, "UCG context", NULL, ucg_config_t)
     ucg_plan_component_t* planc; \
     for (idx = 0, planner = (_ctx)->planners, planc = planner->plan_component; \
          idx < (_ctx)->num_planners; \
-         idx++, planner++, planc = planner->plan_component)
+         idx++, planner++, planc = idx < (_ctx)->num_planners ? planner->plan_component : NULL)
 
 static ucs_status_t ucg_context_set_am_handler(ucg_plan_ctx_h plan_ctx,
                                                unsigned assigned_am_id,
