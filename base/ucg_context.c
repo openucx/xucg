@@ -130,11 +130,12 @@ static void ucg_context_cleanup(void *groups_ctx)
 static void ucg_context_copy_used_ucp_params(ucp_params_t *dst,
                                              const ucp_params_t *src)
 {
-    size_t ucp_params_size = sizeof(src->field_mask);
+    /* copy all is the safest way */
+    size_t ucp_params_size = sizeof(ucp_params_t);
 
     if (src->field_mask != 0) {
         enum ucp_params_field msb_flag = UCS_BIT((sizeof(msb_flag) * 8) - 1 -
-                ucs_count_leading_zero_bits(src->field_mask));
+                ucs_count_leading_zero_bits((typeof(msb_flag))src->field_mask));
 
         switch (msb_flag) {
         case UCP_PARAM_FIELD_FEATURES:
