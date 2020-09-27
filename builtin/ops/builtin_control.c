@@ -246,8 +246,9 @@ ucs_status_t ucg_builtin_step_zcopy_prep(ucg_builtin_op_step_t *step)
 
     /* Initialize all the zero-copy send completion structures */
     while (zcomp_cnt--) {
-        zcomp->comp.func  = ucg_builtin_step_am_zcopy_comp_step_check_cb;
-        zcomp->comp.count = 1;
+        zcomp->comp.func   = ucg_builtin_step_am_zcopy_comp_step_check_cb;
+        zcomp->comp.count  = 1;
+        zcomp->comp.status = UCS_OK;
         zcomp++;
     }
 
