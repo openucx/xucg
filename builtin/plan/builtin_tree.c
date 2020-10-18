@@ -41,7 +41,9 @@ static inline ucs_status_t ucg_builtin_tree_connect_phase(ucg_builtin_plan_phase
 
     ucs_assert(peer_cnt > 0);
     if ((peer_cnt == 1) || coll_flags) {
-        ucg_group_member_index_t peer = peers[0];
+        ucg_group_member_index_t peer;
+flagless_retry:
+        peer = peers[0];
 #ifdef HAVE_UCT_COLLECTIVES
         if (coll_flags & (UCG_PLAN_CONNECT_FLAG_WANT_INCAST |
                           UCG_PLAN_CONNECT_FLAG_WANT_BCAST)) {
@@ -69,6 +71,10 @@ static inline ucs_status_t ucg_builtin_tree_connect_phase(ucg_builtin_plan_phase
 
         if ((status != UCS_ERR_UNREACHABLE) || !coll_flags) {
             return status;
+        } else if (coll_flags) {
+            /* retry - without the flags */
+            coll_flags = 0;
+            goto flagless_retry;
         }
     }
 

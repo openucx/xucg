@@ -100,7 +100,7 @@ static void UCS_F_ALWAYS_INLINE
 ucg_builtin_mpi_reduce(void *mpi_op, void *src, void *dst,
                        int dcount, void* mpi_datatype)
 {
-    UCS_PROFILE_CALL_VOID(ucg_global_params.mpi_reduce_f, mpi_op, (char*)src,
+    UCS_PROFILE_CALL_VOID(ucg_global_params.reduce_cb_f, mpi_op, (char*)src,
                           (char*)dst, (unsigned)dcount, mpi_datatype);
 }
 

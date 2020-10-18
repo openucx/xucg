@@ -62,13 +62,13 @@ static void ucg_builtin_init_gather_terminal(ucg_builtin_op_t *op, ucg_coll_id_t
 static void ucg_builtin_init_reduce_recursive(ucg_builtin_op_t *op, ucg_coll_id_t coll_id)
 {
     ucg_builtin_op_step_t *step = &op->steps[0];
-    memcpy(step->recv_buffer, op->super.params.send.buf, step->buffer_length);
+    memcpy(step->recv_buffer, op->super.params.send.buffer, step->buffer_length);
 }
 
 static void ucg_builtin_init_reduce(ucg_builtin_op_t *op, ucg_coll_id_t coll_id)
 {
     ucg_builtin_op_step_t *step = &op->steps[0];
-    memcpy(step->recv_buffer, op->super.params.send.buf, step->buffer_length);
+    memcpy(step->recv_buffer, op->super.params.send.buffer, step->buffer_length);
     ucs_assert(op->super.params.type.root == op->super.plan->my_index);
 }
 
@@ -217,7 +217,19 @@ void ucg_builtin_print_pack_cb_name(uct_pack_callback_t pack_single_cb)
     }
 }
 
-static void ucg_builtin_step_am_zcopy_comp_step_check_cb(uct_completion_t *self)
+/*
+ * Note: Change-ID 8da6a5be2e changed the UCT API w.r.t. uct_pending_callback_t:
+ *
+ * After:  typedef void (*uct_completion_callback_t)(uct_completion_t *self);
+ * Before: typedef void (*uct_completion_callback_t)(uct_completion_t *self,
+ *                                                   ucs_status_t status);
+ */
+static void ucg_builtin_step_am_zcopy_comp_step_check_cb(uct_completion_t *self
+#ifdef HAVE_UCT_COMP_CB_STATUS_ARG
+                                                       , ucs_status_t status)
+#else
+                                                        )
+#endif
 {
     ucg_builtin_zcomp_t *zcomp  = ucs_container_of(self, ucg_builtin_zcomp_t, comp);
     ucg_builtin_request_t *req  = zcomp->req;
@@ -378,11 +390,19 @@ static inline ucs_status_t
 ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
                             ucg_builtin_plan_phase_t *phase,
                             const ucg_collective_params_t *params,
+#ifdef HAVE_UCT_COLLECTIVES
                             uct_coll_dtype_mode_t mode,
+#endif
                             uint64_t *send_flag)
 {
     size_t dt_len      = params->send.dt_len;
     size_t length      = step->buffer_length;
+
+#ifndef HAVE_UCT_COLLECTIVES
+    int supports_short = (phase->iface_attr->cap.flags & UCT_IFACE_FLAG_AM_SHORT);
+    int supports_bcopy = (phase->iface_attr->cap.flags & UCT_IFACE_FLAG_AM_BCOPY);
+    int supports_zcopy = (phase->iface_attr->cap.flags & UCT_IFACE_FLAG_AM_ZCOPY);
+#else
     int supports_short = (phase->iface_attr->cap.flags & UCT_IFACE_FLAG_AM_SHORT) &&
                         ((phase->iface_attr->cap.coll_mode.short_flags & UCS_BIT(mode)) ||
                          (mode == UCT_COLL_DTYPE_MODE_PADDED));
@@ -395,6 +415,7 @@ ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
 
     ucs_assert((mode == UCT_COLL_DTYPE_MODE_PADDED) ||
                (phase->iface_attr->cap.am.coll_mode_flags & mode));
+#endif
 
     /*
      * Short messages
@@ -409,12 +430,16 @@ ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
             return UCS_OK;
         }
 
+#ifdef HAVE_UCT_COLLECTIVES
         size_t max_bcopy       = phase->iface_attr->cap.am.max_bcopy;
         size_t short_msg_count = length / max_short + ((length % max_short) != 0);
         size_t bcopy_msg_count = supports_bcopy ?
                 (length / max_bcopy + ((length % max_bcopy) != 0)) : SIZE_MAX;
         int is_short_best = (short_msg_count * phase->iface_attr->overhead_short) <
                             (bcopy_msg_count * phase->iface_attr->overhead_bcopy);
+#else
+        int is_short_best = 1;
+#endif
 
         if (is_short_best || (!supports_bcopy && !supports_zcopy)) {
             /* Short send - multiple messages */
@@ -494,12 +519,14 @@ void ucg_builtin_step_select_packers(const ucg_collective_params_t *params,
 
     if ((is_reduce) &&
         (step->flags & UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_SHORT) &&
-        (ucg_global_params.type_info.mpi_is_int_f != NULL) &&
-        (ucg_global_params.type_info.mpi_is_int_f(params->send.dt_ext)) &&
-        (ucg_global_params.type_info.mpi_is_sum_f != NULL) &&
-        (ucg_global_params.type_info.mpi_is_sum_f(params->send.op_ext))) {
+        (ucg_global_params.type_info.datatype_is_integer_f != NULL) &&
+        (ucg_global_params.type_info.datatype_is_integer_f(params->send.dt_ext)) &&
+        (ucg_global_params.type_info.reduce_op_is_sum_f != NULL) &&
+        (ucg_global_params.type_info.reduce_op_is_sum_f(params->send.op_ext))) {
         int is_single = (params->send.count == 1);
+#ifdef HAVE_UCT_COLLECTIVES
         step->uct_flags |= (UCT_SEND_FLAG_PACK_LOCK << UCT_COLL_DTYPE_MODE_BITS);
+#endif
         switch (params->send.dt_len) {
         case 1:
             step->bcopy.pack_single_cb = is_single ?
@@ -587,7 +614,7 @@ zcopy_redo:
     step->iter_ep                 = 0;
     step->iter_offset             = 0;
     step->fragment_pending        = NULL;
-    step->recv_buffer             = (int8_t*)params->recv.buf;
+    step->recv_buffer             = (int8_t*)params->recv.buffer;
     step->uct_md                  = phase->md;
     step->uct_flags               = 0;
     step->flags                   = ucg_builtin_step_method_flags[phase->method];
@@ -611,16 +638,18 @@ zcopy_redo:
     if (*flags & UCG_BUILTIN_STEP_RECV_FLAGS) {
         step->send_buffer = *current_data_buffer ?
                             *current_data_buffer :
-                            (int8_t*)params->send.buf;
+                            (int8_t*)params->send.buffer;
     } else {
         ucs_assert(*current_data_buffer == NULL);
-        step->send_buffer = (params->send.buf == ucg_global_params.mpi_in_place) ?
-                            (int8_t*)params->recv.buf :
-                            (int8_t*)params->send.buf;
+        step->send_buffer = (params->send.buffer == ucg_global_params.mpi_in_place) ?
+                            (int8_t*)params->recv.buffer :
+                            (int8_t*)params->send.buffer;
     }
 
-    uct_coll_dtype_mode_t mode;
+    uint64_t send_flags;
     int is_concat = modifiers & UCG_GROUP_COLLECTIVE_MODIFIER_CONCATENATE;
+#ifdef HAVE_UCT_COLLECTIVES
+    uct_coll_dtype_mode_t mode;
     if (is_concat) {
         if (modifiers & UCG_GROUP_COLLECTIVE_MODIFIER_VARIADIC) {
             mode = UCT_COLL_DTYPE_MODE_VAR_DTYPE;
@@ -634,9 +663,12 @@ zcopy_redo:
     }
 
     /* Decide how the messages are sent (regardless of my role) */
-    uint64_t send_flags;
     ucs_status_t status = ucg_builtin_step_send_flags(step, phase, params,
                                                       mode, &send_flags);
+#else
+    ucs_status_t status = ucg_builtin_step_send_flags(step, phase, params,
+                                                      &send_flags);
+#endif
     if (ucs_unlikely(status != UCS_OK)) {
         return status;
     }
@@ -652,7 +684,6 @@ zcopy_redo:
      *       follow-up, by filling the missing step with remote key exchange.
      */
     if ((send_flags & UCT_IFACE_FLAG_AM_ZCOPY) && !(*zcopy_step_skip)) {
-        printf("ZCOPY!\n\n");
         *zcopy_step_skip = 1;
         step++;
         goto zcopy_redo;
@@ -665,6 +696,7 @@ zcopy_redo:
                                                            "ucg_builtin_step_pipelining");
     }
 
+#ifdef HAVE_UCT_COLLECTIVES
     if ((phase->method == UCG_PLAN_METHOD_SEND_TO_SM_ROOT) &&
         (phase->iface_attr->cap.flags & (UCT_IFACE_FLAG_INCAST |
                                          UCT_IFACE_FLAG_BCAST))) {
@@ -681,6 +713,7 @@ zcopy_redo:
             //step->zcopy.iov[1].buffer = (void*)params->send.displs;
         }
     }
+#endif
 
     /* Do any special assignment w.r.t. the src/dst buffers in this step */
     int is_send            = 0;
@@ -726,7 +759,7 @@ zcopy_redo:
         }
         /* no break */
     case UCG_PLAN_METHOD_RECV_TERMINAL:
-        *current_data_buffer = (int8_t*)params->recv.buf;
+        *current_data_buffer = (int8_t*)params->recv.buffer;
         break;
 
     case UCG_PLAN_METHOD_REDUCE_WAYPOINT:
@@ -847,7 +880,11 @@ zcopy_redo:
     }
 
     /* Choose the data-related action to be taken by the incoming AM handler */
+#ifdef HAVE_UCT_COLLECTIVES
     int is_incast_used = (phase->iface_attr->cap.flags & UCT_IFACE_FLAG_INCAST) != 0;
+#else
+    int is_incast_used = 0;
+#endif
     if (is_barrier || !(step->flags & UCG_BUILTIN_STEP_RECV_FLAGS)) {
         step->comp_aggregation = UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_NOP;
     } else if ((send_flags & UCT_IFACE_FLAG_AM_ZCOPY) && (zcopy_step_skip)) {
@@ -931,7 +968,7 @@ ucs_status_t ucg_builtin_step_create_rkey_bcast(ucg_builtin_plan_t *plan,
     ucg_collective_params_t step_params;
     if (params->type.root == plan->super.my_index) {
         /* This is the sender of the remote key */
-        step_params.send.buf       = info_buffer;
+        step_params.send.buffer    = info_buffer;
         step_params.send.count     = 1;
         step_params.send.dt_len    = info_size;
         step_params.type.root      = params->type.root;
@@ -969,7 +1006,7 @@ ucs_status_t ucg_builtin_step_create_rkey_bcast(ucg_builtin_plan_t *plan,
         }
     } else {
         /* This is a receiver of the remote key */
-        step_params.recv.buf       = info_buffer;
+        step_params.recv.buffer    = info_buffer;
         step_params.recv.count     = 1;
         step_params.recv.dt_len    = info_size;
         step_params.type.root      = params->type.root;

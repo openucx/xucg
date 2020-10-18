@@ -19,6 +19,7 @@
 #include <ucs/datastruct/mpool.h>
 #include <ucs/datastruct/queue_types.h>
 #include <ucs/datastruct/list.h>
+#include <ucs/type/spinlock.h>
 
 BEGIN_C_DECLS
 
@@ -306,6 +307,15 @@ ucs_status_t ucg_ft_end(ucg_ft_h handle,
 ucs_status_t ucg_ft_propagate(ucg_group_h group,
                               const ucg_group_params_t *params,
                               uct_ep_h new_ep);
+
+
+#ifndef UCS_ALLOC_CHECK
+#define UCS_ALLOC_CHECK(size, name) ({ \
+    void* ptr = ucs_malloc(size, name); \
+    if (ptr == 0) return UCS_ERR_NO_MEMORY; \
+    ptr; \
+})
+#endif
 
 END_C_DECLS
 

@@ -82,25 +82,28 @@ static UCS_F_ALWAYS_INLINE ucs_status_t ucg_coll_barrier_init(               \
 }
 
 #define UCG_COLL_PARAMS_BUF_R(_buf, _count, _dt_len, _dt_ext) \
-    .buf    = _buf,                                           \
-    .count  = _count,                                         \
-    .dt_len = _dt_len,                                        \
-    .dt_ext = _dt_ext,                                        \
-    .op_ext = op
+    .buffer   = _buf,                                         \
+    .count    = _count,                                       \
+    .dt_len   = _dt_len,                                      \
+    .dt_ext   = _dt_ext,                                      \
+    .op_ext   = op,                                           \
+    .reserved = 0
 
 #define UCG_COLL_PARAMS_BUF_V(_buf, _counts, _dt_len, _dt_ext, _displs) \
-    .buf    = _buf,                                                     \
-    .counts = _counts,                                                  \
-    .dt_len = _dt_len,                                                  \
-    .dt_ext = _dt_ext,                                                  \
-    .displs = _displs
+    .buffer   = _buf,                                                   \
+    .counts   = _counts,                                                \
+    .dt_len   = _dt_len,                                                \
+    .dt_ext   = _dt_ext,                                                \
+    .displs   = _displs,                                                \
+    .reserved = 0
 
 #define UCG_COLL_PARAMS_BUF_W(_buf, _counts, _dts_len, _dts_ext, _displs) \
-    .buf     = _buf,                                                      \
-    .counts  = _counts,                                                   \
-    .dts_len = _dts_len,                                                  \
-    .dts_ext = _dts_ext,                                                  \
-    .displs  = _displs
+    .buffer   = _buf,                                                     \
+    .counts   = _counts,                                                  \
+    .dts_len  = _dts_len,                                                 \
+    .dts_ext  = _dts_ext,                                                 \
+    .displs   = _displs,                                                  \
+    .reserved = 0
 
 #define UCG_COLL_INIT_HALF(_lname, _uname, _non_root_only_sends, _stype,       \
                            _sargs, _rtype, _rargs, ...)                        \
@@ -122,7 +125,7 @@ static UCS_F_ALWAYS_INLINE ucs_status_t ucg_coll_##_lname##_init(__VA_ARGS__,  \
             .recv = {                                                          \
                 UCG_COLL_PARAMS_BUF##_rtype _rargs                             \
             },                                                                 \
-            .recv_only = {{0, 0}, 0}                                           \
+            .recv_only = { { 0, 0 }, NULL }                                    \
         };                                                                     \
         return ucg_collective_create(group, &full_params, coll_p);             \
     } else {                                                                   \
@@ -180,7 +183,7 @@ static UCS_F_ALWAYS_INLINE ucs_status_t ucg_coll_##_lname##_init(__VA_ARGS__,  \
         .recv = {                                                              \
             UCG_COLL_PARAMS_BUF##_rtype _rargs                                 \
         },                                                                     \
-        .recv_only = {{0, 0}, 0}                                               \
+        .recv_only = { { 0, 0 }, NULL }                                        \
     };                                                                         \
     return ucg_collective_create(group, &params, coll_p);                      \
 }

@@ -131,25 +131,28 @@ typedef struct ucg_params {
      * additional functions to detect the type of reduction, so that simple
      * reductions (e.g. sum on integers) doesn't require using this callback.
      */
-    void (*mpi_reduce_f)(void *mpi_op,
-                         char *src,
-                         char *dst,
-                         unsigned count,
-                         void *mpi_dtype);
+    void (*reduce_cb_f)(void *reduce_op,
+                        char *src,
+                        char *dst,
+                        unsigned count,
+                        void *datatype);
 
     /* Basic MPI Operation type and data-type information - using callbacks */
     struct {
-        /* Check to determine if an MPI datatype is an integer (of any length) */
-        int (*mpi_is_int_f)(void *mpi_dtype);
+        /* Convert the opaque data-type into UCX's structure */
+        int (*datatype_convert)(void *datatype, ucp_datatype_t **ucp_datatype);
 
-        /* Check to determine if an MPI datatype is a floating-point (of any length) */
-        int (*mpi_is_fp_f)(void *mpi_dtype);
+        /* Check to determine if an MPI data-type is an integer (of any length) */
+        int (*datatype_is_integer_f)(void *datatype);
 
-        /* Check to determine if an MPI reduction operations is MPI_SUM */
-        int (*mpi_is_sum_f)(void *mpi_op);
+        /* Check to determine if an MPI data-type is a floating-point (of any length) */
+        int (*datatype_is_floating_point_f)(void *datatype);
 
-        /* Check to determine if an MPI reduction operations is MPI_MINLOC/MAXLOC */
-        int (*mpi_is_loc_f)(void *mpi_op);
+        /* Check to determine if an MPI reduction operation is MPI_SUM */
+        int (*reduce_op_is_sum_f)(void *reduce_op);
+
+        /* Check to determine if an MPI reduction operation is MPI_MINLOC/MAXLOC */
+        int (*reduce_op_is_loc_f)(void *reduce_op);
     } type_info;
 
     /* The value of MPI_IN_PLACE, which can replace send or receive buffers */
@@ -332,24 +335,25 @@ typedef struct ucg_collective {
      */
 
     struct {
-        void          *buf;     /**< buffer location to use */
+        void                 *buffer;  /**< buffer location to use */
         union {
-            int64_t    count;   /**< item count (not int - to consume space) */
-            const int *counts;  /**< item count array */
+            int64_t           count;   /**< item count (not int - to consume space) */
+            const int        *counts;  /**< item count array */
         };
         union {
-            size_t     dt_len;  /**< external datatype length */
-            size_t    *dts_len; /**< external datatype length array */
+            size_t            dt_len;  /**< external datatype length */
+            size_t           *dts_len; /**< external datatype length array */
         };
         union {
-            void      *dt_ext;  /**< external datatype context */
-            void      *dts_ext; /**< external datatype context array */
+            void             *dt_ext;  /**< external datatype context */
+            void             *dts_ext; /**< external datatype context array */
         };
         union {
-            size_t     stride;  /**< item stride */
-            const int *displs;  /**< item displacement array */
-            void      *op_ext;  /**< external reduce operation handle */
+            size_t            stride;  /**< item stride */
+            const int        *displs;  /**< item displacement array */
+            void             *op_ext;  /**< external reduce operation handle */
         };
+        uint64_t              reserved; /**< unused except padding, must be zero */
     } send, recv;
 
     /*

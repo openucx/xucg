@@ -155,6 +155,7 @@ static ucs_status_t ucg_group_init_cache(ucg_group_h group)
     };
 
     /* Clear the cache */
+    group->cache_size = 0;
     memset(group->cache, 0, sizeof(group->cache));
 
     /* Create a plan for barrier, so that we can assume it exists in run-time */
@@ -439,10 +440,10 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_collective_create,
                   "recv=[%p,%lu,%lu,%p,%p], cb=%p(%p), op=%p}",
                   plan->planner->name, plan->planner->component->name,
                   (uint16_t)params->type.modifiers,
-                  (uint64_t)params->type.root, params->send.buf,
+                  (uint64_t)params->type.root, params->send.buffer,
                   params->send.count, params->send.dt_len,
                   params->send.dt_ext, params->send.displs,
-                  params->recv.buf, params->recv.count, params->recv.dt_len,
+                  params->recv.buffer, params->recv.count, params->recv.dt_len,
                   params->recv.dt_ext, params->recv.displs,
                   params->comp_cb, params->recv_only.comp_cb,
                   params->recv.op_ext);
