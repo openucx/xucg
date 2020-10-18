@@ -14,12 +14,8 @@
 #include <ucp/core/ucp_request.h>
 #include <ucs/datastruct/ptr_array.h>
 
-#ifdef HAVE_UCP_EXTENSIONS
-#define UCS_ALLOC_CHECK(size, name) ({ \
-    void* ptr = ucs_malloc(size, name); \
-    if (ptr == 0) return UCS_ERR_NO_MEMORY; \
-    ptr; \
-})
+#ifndef HAVE_UCP_EXTENSIONS
+#define UCT_COLL_DTYPE_MODE_BITS (0)
 #endif
 
 BEGIN_C_DECLS

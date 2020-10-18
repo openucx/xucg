@@ -95,9 +95,11 @@ ucg_builtin_step_am_short_max(ucg_builtin_request_t *req,
     UCG_BUILTIN_ASSERT_SEND(step, AM_SHORT);
     ucs_assert(step->iter_offset != UCG_BUILTIN_OFFSET_PIPELINE_READY);
     ucs_assert(step->iter_offset != UCG_BUILTIN_OFFSET_PIPELINE_PENDING);
+#ifdef HAVE_UCT_COLLECTIVES
     ucs_assert(frag_size == (is_packed ?
                UCT_COLL_DTYPE_MODE_UNPACK_VALUE(step->fragment_length) :
                step->fragment_length));
+#endif
 
     /* send every fragment but the last */
     if (ucs_likely(buffer_iter < buffer_iter_limit)) {

@@ -149,6 +149,22 @@ ucs_status_t ucg_plan_init(ucg_plan_desc_t *descs, unsigned desc_cnt,
             continue;
         }
 
+#ifndef HAVE_UCP_EXTENSIONS
+        /*
+         * Find an unused AM_ID between 0 and UCP_AM_ID_LAST, because UCP will
+         * disregard any value above that (since UCP_AM_ID_MAX isn't there).
+         */
+        if (am_id == UCP_AM_ID_LAST) {
+            am_id = 1; /* AM ID #0 would complicate debugging */
+        }
+
+        while (ucp_am_handlers[am_id].cb != NULL) {
+            am_id++;
+        }
+
+        ucs_assert_always(am_id < UCP_AM_ID_LAST);
+#endif
+
         plan_config->am_id = &am_id;
 
         status = comp->init(plan, plan_config);
@@ -163,6 +179,15 @@ ucs_status_t ucg_plan_init(ucg_plan_desc_t *descs, unsigned desc_cnt,
         total_size += comp->per_group_ctx_size;
     }
 
+#if ENABLE_FAULT_TOLERANCE
+    /* Initialize the fault-tolerance context for the entire UCG layer */
+    status = ucg_ft_init(&worker->async, new_group, ucg_base_am_id + idx,
+                         ucg_group_fault_cb, ctx, &ctx->ft_ctx);
+    if (status != UCS_OK) {
+        goto cleanup_pctx;
+    }
+#endif
+
     *per_group_ctx_size = total_size;
 
     return UCS_OK;
@@ -171,6 +196,13 @@ ucs_status_t ucg_plan_init(ucg_plan_desc_t *descs, unsigned desc_cnt,
 void ucg_plan_finalize(ucg_plan_desc_t *descs, unsigned desc_cnt,
                        ucg_plan_ctx_h plan)
 {
+
+#if ENABLE_FAULT_TOLERANCE
+    if (ucs_list_is_empty(&group->list)) {
+        ucg_ft_cleanup(&gctx->ft_ctx);
+    }
+#endif
+
     void *dummy_group = NULL;
     ucg_plan_foreach(descs, desc_cnt, plan, dummy_group) {
         comp->finalize(plan);

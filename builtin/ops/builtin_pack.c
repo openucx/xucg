@@ -7,6 +7,10 @@
 
 #include <ucs/arch/atomic.h>
 
+#ifndef HAVE_UCT_COLLECTIVES
+#define UCT_PACK_CALLBACK_REDUCE ((uintptr_t)-1)
+#endif
+
 int ucg_builtin_atomic_reduce_full(ucg_builtin_request_t *req,
         void *src, void *dst, size_t length);
 int ucg_builtin_atomic_reduce_part(ucg_builtin_request_t *req,

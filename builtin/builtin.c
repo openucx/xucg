@@ -16,9 +16,12 @@
 /* Backport to UCX v1.6.0 */
 #ifndef UCS_MEMUNITS_INF
 #define UCS_MEMUNITS_INF UCS_CONFIG_MEMUNITS_INF
-#define CONDITIONAL_NULL
-#else
+#endif
+
+#ifdef HAVE_UCP_EXTENSIONS
 #define CONDITIONAL_NULL ,NULL
+#else
+#define CONDITIONAL_NULL
 #endif
 
 #define UCG_BUILTIN_PARAM_MASK   (UCG_GROUP_PARAM_FIELD_ID           |\
@@ -165,12 +168,14 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_am_handler,
                   header->group_id, header->msg.coll_id, slot->req.latest.coll_id,
                   header->msg.step_idx, slot->req.latest.step_idx);
 
+#ifdef HAVE_UCT_COLLECTIVES
     /* In case of a stride - the stored length is actually longer */
     if (am_flags & UCT_CB_PARAM_FLAG_STRIDE) {
         length = sizeof(ucg_builtin_header_t) +
                 (length - sizeof(ucg_builtin_header_t)) *
                 (gctx->group_params->member_count - 1);
     }
+#endif
 
     /* Store the message (if the relevant step has not been reached) */
     ucp_recv_desc_t *rdesc;
@@ -521,6 +526,7 @@ void ucg_builtin_print_flags(ucg_builtin_op_step_t *step)
     flag = ((step->flags & UCG_BUILTIN_OP_STEP_FLAG_TEMP_BUFFER_USED) != 0);
     printf("\n\tTEMP_BUFFER_USED:\t%i", flag);
 
+#ifdef HAVE_UCP_EXTENSIONS
     flag = ((step->flags & UCG_BUILTIN_OP_STEP_FLAG_PACKED_DTYPE_MODE) != 0);
     printf("\n\tPACKED_DTYPE_MODE:\t%i", flag);
     if (flag) {
@@ -557,6 +563,7 @@ void ucg_builtin_print_flags(ucg_builtin_op_step_t *step)
             break;
         }
     }
+#endif
 
     printf("\n\tData aggregation:\t");
     switch (step->comp_aggregation) {
@@ -816,15 +823,19 @@ ucs_status_t ucg_builtin_connect(ucg_builtin_group_ctx_t *ctx,
 #endif
     if (is_mock) {
         // TODO: allocate mock attributes according to flags (and later free it)
-        unsigned dtype_support = UCS_MASK(UCT_COLL_DTYPE_MODE_LAST);
         memset(&mock_ep_attr, 0, sizeof(mock_ep_attr));
 
-        mock_ep_attr.cap.am.max_short          = SIZE_MAX;
+#ifdef HAVE_UCT_COLLECTIVES
+        unsigned dtype_support                 = UCS_MASK(UCT_COLL_DTYPE_MODE_LAST);
         mock_ep_attr.cap.flags                 = UCT_IFACE_FLAG_AM_SHORT |
                                                  UCT_IFACE_FLAG_INCAST   |
                                                  UCT_IFACE_FLAG_BCAST;
         mock_ep_attr.cap.am.coll_mode_flags    = dtype_support;
         mock_ep_attr.cap.coll_mode.short_flags = dtype_support;
+#else
+        mock_ep_attr.cap.flags                 = UCT_IFACE_FLAG_AM_SHORT;
+#endif
+        mock_ep_attr.cap.am.max_short          = SIZE_MAX;
         phase->iface_attr                      = &mock_ep_attr;
         phase->md                              = NULL;
 

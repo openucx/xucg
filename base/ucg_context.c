@@ -31,11 +31,48 @@ ucs_config_field_t ucg_config_table[] = {
 
 UCS_CONFIG_REGISTER_TABLE(ucg_config_table, "UCG context", NULL, ucg_config_t)
 
+#ifndef HAVE_UCP_EXTENSIONS
+typedef struct ucp_workaround {
+    uct_am_callback_t wrapper_cb;
+    uct_am_callback_t cb;
+    void             *arg;
+} ucp_workaround_t;
+
+extern ucp_workaround_t ucp_workaround_cb[];
+
+static ucs_status_t ucg_context_worker_wrapperA_am_cb(void *arg, void *data,
+                                                     size_t length,
+                                                     unsigned flags)
+{
+    return ucp_workaround_cb[0].cb(ucp_workaround_cb[0].cb, data, length, flags);
+}
+
+static ucs_status_t ucg_context_worker_wrapperB_am_cb(void *arg, void *data,
+                                                     size_t length,
+                                                     unsigned flags)
+{
+    return ucp_workaround_cb[1].cb(ucp_workaround_cb[1].cb, data, length, flags);
+}
+
+static ucs_status_t ucg_context_worker_wrapperC_am_cb(void *arg, void *data,
+                                                     size_t length,
+                                                     unsigned flags)
+{
+    return ucp_workaround_cb[2].cb(ucp_workaround_cb[2].cb, data, length, flags);
+}
+
+static unsigned ucp_workaround_cnt = 0;
+ucp_workaround_t ucp_workaround_cb[] = {
+        { .wrapper_cb = ucg_context_worker_wrapperA_am_cb },
+        { .wrapper_cb = ucg_context_worker_wrapperB_am_cb },
+        { .wrapper_cb = ucg_context_worker_wrapperC_am_cb }
+};
+#endif
+
 ucs_status_t ucg_context_set_am_handler(ucg_plan_ctx_h plan_ctx, uint8_t id,
                                         uct_am_callback_t cb,
                                         uct_am_tracer_t tracer)
 {
-#ifdef HAVE_UCP_EXTENSIONS
     /*
      * Set the Active Message handler (before creating the UCT interfaces)
      *
@@ -46,22 +83,22 @@ ucs_status_t ucg_context_set_am_handler(ucg_plan_ctx_h plan_ctx, uint8_t id,
      * guarantees once init is finished on any of the processes - the others are
      * aware of this ID and messages can be sent.
      */
-    ucp_am_handler_t* am_handler     = ucp_am_handlers + id;
-    am_handler->features             = UCP_FEATURE_GROUPS;
-    am_handler->cb                   = cb;
-    am_handler->tracer               = (ucp_am_tracer_t)tracer;
-    am_handler->flags                = UCT_CB_FLAG_ALT_ARG;
-    am_handler->alt_arg              = plan_ctx;
+    ucp_am_handler_t* am_handler  = ucp_am_handlers + id;
+    am_handler->tracer            = (ucp_am_tracer_t)tracer;
+#ifdef HAVE_UCP_EXTENSIONS
+    am_handler->features          = UCP_FEATURE_GROUPS;
+    am_handler->flags             = UCT_CB_FLAG_ALT_ARG;
+    am_handler->cb                = cb;
+    am_handler->alt_arg           = plan_ctx;
 #else
-    for (i = 0; i < worker->num_ifaces; i++) {
-        ucs_status_t status = uct_iface_set_am_handler(worker->ifaces[i]->iface,
-                                                       assigned_am_id,
-                                                       am_cb, worker, 0);
-        if (status != UCS_OK) {
-            return status;
-        }
-    }
-    /* TODO: need some synchronization to avoid AM_ID race condition */
+    unsigned wa_idx               = ucp_workaround_cnt++;
+    am_handler->cb                = ucp_workaround_cb[wa_idx].wrapper_cb;
+    ucp_workaround_cb[wa_idx].arg = cb;
+    ucp_workaround_cb[wa_idx].arg = plan_ctx;
+    am_handler->features          = 0;
+    am_handler->flags             = 0;
+
+    ucs_assert_always(ucp_workaround_cnt <= ucs_array_size(ucp_workaround_cb));
 #endif
 
     return UCS_OK;
@@ -93,15 +130,6 @@ static ucs_status_t ucg_context_init(void *groups_ctx)
         goto cleanup_pctx;
     }
 
-#if ENABLE_FAULT_TOLERANCE
-    /* Initialize the fault-tolerance context for the entire UCG layer */
-    status = ucg_ft_init(&worker->async, new_group, ucg_base_am_id + idx,
-                         ucg_group_fault_cb, ctx, &ctx->ft_ctx);
-    if (status != UCS_OK) {
-        goto cleanup_pctx;
-    }
-#endif
-
     ucs_list_head_init(&ctx->groups_head);
 
     return UCS_OK;
@@ -125,17 +153,12 @@ static void ucg_context_cleanup(void *groups_ctx)
         }
     }
 
-#if ENABLE_FAULT_TOLERANCE
-    if (ucs_list_is_empty(&group->list)) {
-        ucg_ft_cleanup(&gctx->ft_ctx);
-    }
-#endif
-
     ucg_plan_finalize(ctx->planners, ctx->num_planners, ctx->planners_ctx);
     ucs_free(ctx->planners_ctx);
     ucs_free(ctx->planners);
 }
 
+#ifdef HAVE_UCP_EXTENSIONS
 static void ucg_context_copy_used_ucp_params(ucp_params_t *dst,
                                              const ucp_params_t *src)
 {
@@ -191,6 +214,10 @@ static void ucg_context_copy_used_ucp_params(ucp_params_t *dst,
 
     memcpy(dst, src, ucp_params_size);
 }
+#else
+#define ucs_count_leading_zero_bits(_n) \
+    ((sizeof(_n) <= 4) ? __builtin_clz((uint32_t)(_n)) : __builtin_clzl(_n))
+#endif
 
 static void ucg_context_copy_used_ucg_params(ucg_params_t *dst,
                                              const ucg_params_t *src)
@@ -277,9 +304,14 @@ ucs_status_t ucg_init_version(unsigned ucg_api_major_version,
     /* Store the UCG params in a global location, for easy access */
     ucg_context_copy_used_ucg_params(&ucg_global_params, params);
 
+#ifndef HAVE_UCP_EXTENSIONS
+    const ucp_params_t *ucp_params_arg = params->super;
+#else
     /* Avoid overwriting the headroom value by copying all UCP params aside */
     ucp_params_t ucp_params;
+    const ucp_params_t *ucp_params_arg = &ucp_params;
     ucg_context_copy_used_ucp_params(&ucp_params, params->super);
+
     /*
      * Note: This appears to be an overkill, but the reason is we want to change
      *       the value UCG passes to UCP during initialization, without changing
@@ -295,15 +327,30 @@ ucs_status_t ucg_init_version(unsigned ucg_api_major_version,
 
     ucp_params.field_mask       |= UCP_PARAM_FIELD_CONTEXT_HEADROOM;
     ucp_params.context_headroom += ucs_offsetof(ucg_context_t, ucp_ctx);
+#endif
     ucg_global_params.super      = NULL; /* Should never be accessed again */
 
     /* Create the UCP context, which should have room for UCG in its headroom */
     status = ucp_init_version(ucp_api_major_version, ucp_api_minor_version,
-                              &ucp_params, config->ucp_config,
+                              ucp_params_arg, config->ucp_config,
                               (ucp_context_h*)context_p);
     if (status != UCS_OK) {
         goto err_config;
     }
+
+#ifndef HAVE_UCP_EXTENSIONS
+    /* Below is a somewhat "hacky" workaround, involving moving UCP context */
+    size_t headroom = ucs_offsetof(ucg_context_t, ucp_ctx);
+    ucg_context_h tmp = ucs_realloc(*context_p,
+                                    headroom + sizeof(ucp_context_t),
+                                    "ucg_context");
+    if (tmp == NULL) {
+        ucp_cleanup(*(ucp_context_h*)context_p);
+        goto err_config;
+    }
+
+    memmove(UCS_PTR_BYTE_OFFSET(tmp, headroom), tmp, sizeof(ucp_context_t));
+#endif
 
     *context_p = ucs_container_of(*context_p, ucg_context_t, ucp_ctx);
     status     = ucg_context_init(*context_p);
