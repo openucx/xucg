@@ -139,6 +139,9 @@ typedef struct ucg_params {
 
     /* Basic MPI Operation type and data-type information - using callbacks */
     struct {
+        /* Check to determine if an MPI datatype (array) is contiguous */
+        int (*mpi_is_contig_f)(void *mpi_dtype, int count);
+
         /* Check to determine if an MPI datatype is an integer (of any length) */
         int (*mpi_is_int_f)(void *mpi_dtype);
 
@@ -199,7 +202,7 @@ enum ucg_collective_modifiers {
 
     /* Buffer/Data Management Considerations */
     UCG_GROUP_COLLECTIVE_MODIFIER_AGGREGATE_STABLE   = UCS_BIT( 8), /* stable reduction */
-    UCG_GROUP_COLLECTIVE_MODIFIER_IN_PLACE           = UCS_BIT( 9), /* otherwise two buffers */
+    UCG_GROUP_COLLECTIVE_MODIFIER_NONCONTIG_DATATYPE = UCS_BIT( 9), /* some may be non-contiguous */
     UCG_GROUP_COLLECTIVE_MODIFIER_PERSISTENT         = UCS_BIT(10), /* otherwise destroy coll_h */
     UCG_GROUP_COLLECTIVE_MODIFIER_SYMMETRIC          = UCS_BIT(11), /* persistent on all ranks */
     UCG_GROUP_COLLECTIVE_MODIFIER_BARRIER            = UCS_BIT(12), /* prevent others from starting */

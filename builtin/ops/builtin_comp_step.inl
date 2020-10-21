@@ -154,7 +154,7 @@ static void ucg_builtin_comp_gather(uint8_t *recv_buffer, uint8_t *data,
     memcpy(recv_buffer + first_part + length, data, length - first_part);
 }
 
-static UCS_F_ALWAYS_INLINE void
+static UCS_F_ALWAYS_INLINE ucs_status_t
 ucg_builtin_comp_unpack_rkey(ucg_builtin_request_t *req, uint64_t remote_addr,
                              uint8_t *packed_remote_key)
 {
@@ -168,6 +168,8 @@ ucg_builtin_comp_unpack_rkey(ucg_builtin_request_t *req, uint64_t remote_addr,
     if (ucs_unlikely(status != UCS_OK)) {
         ucg_builtin_comp_last_step_cb(req, status);
     }
+
+    return status;
 }
 
 static int UCS_F_ALWAYS_INLINE
@@ -208,6 +210,12 @@ ucg_builtin_step_recv_handle_data(ucg_builtin_request_t *req, uint64_t offset,
 
     case UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_WRITE:
         memcpy(step->recv_buffer + offset, data, length);
+        break;
+
+    case UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_WRITE_UNPACKED:
+        /* Note: worker is NULL since it isn't required for host-based memory */
+        ucp_dt_unpack_only(NULL, step->recv_buffer + offset, step->unpack_count,
+                           step->bcopy.datatype, UCS_MEMORY_TYPE_HOST, data, length, 0);
         break;
 
     case UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_GATHER_TERMINAL:
