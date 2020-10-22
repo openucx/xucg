@@ -575,6 +575,10 @@ void ucg_builtin_print_flags(ucg_builtin_op_step_t *step)
         printf("write");
         break;
 
+    case UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_WRITE_UNPACKED:
+        printf("write (unpacked)");
+        break;
+
     case UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_GATHER_TERMINAL:
         printf("gather (terminal)");
         break;

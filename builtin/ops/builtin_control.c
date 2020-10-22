@@ -558,23 +558,29 @@ void ucg_builtin_step_select_packers(const ucg_collective_params_t *params,
         }
     }
 
-    int is_variadic = (params->type.modifiers &
-                       UCG_GROUP_COLLECTIVE_MODIFIER_VARIADIC);
+    int is_variadic   = (params->type.modifiers &
+                         UCG_GROUP_COLLECTIVE_MODIFIER_VARIADIC);
+    int is_src_contig = ((ucg_global_params.type_info.mpi_is_contig_f != NULL) &&
+                         (ucg_global_params.type_info.mpi_is_contig_f(params->send.dt_ext,
+                                                                      params->send.count)));
 
-    step->bcopy.pack_full_cb = is_reduce ?
-            UCG_BUILTIN_PACKER_NAME(_reducing_, full) :
-            is_variadic ? UCG_BUILTIN_PACKER_NAME(_variadic_, full) :
-                          UCG_BUILTIN_PACKER_NAME(_, full);
-
-    step->bcopy.pack_part_cb = is_reduce ?
-            UCG_BUILTIN_PACKER_NAME(_reducing_, part) :
-            is_variadic ? UCG_BUILTIN_PACKER_NAME(_variadic_, part) :
-                          UCG_BUILTIN_PACKER_NAME(_, part);
-
-    step->bcopy.pack_single_cb = is_reduce ?
-            UCG_BUILTIN_PACKER_NAME(_reducing_, single) :
-            is_variadic ? UCG_BUILTIN_PACKER_NAME(_variadic_, single) :
-                          UCG_BUILTIN_PACKER_NAME(_, single);
+    if (is_reduce) {
+        step->bcopy.pack_full_cb   = UCG_BUILTIN_PACKER_NAME(_reducing_, full);
+        step->bcopy.pack_part_cb   = UCG_BUILTIN_PACKER_NAME(_reducing_, part);
+        step->bcopy.pack_single_cb = UCG_BUILTIN_PACKER_NAME(_reducing_, single);
+    } else if (is_variadic) {
+        step->bcopy.pack_full_cb   = UCG_BUILTIN_PACKER_NAME(_variadic_, full);
+        step->bcopy.pack_part_cb   = UCG_BUILTIN_PACKER_NAME(_variadic_, part);
+        step->bcopy.pack_single_cb = UCG_BUILTIN_PACKER_NAME(_variadic_, single);
+    } else if (!is_src_contig) {
+        step->bcopy.pack_full_cb   = UCG_BUILTIN_PACKER_NAME(_datatype_, full);
+        step->bcopy.pack_part_cb   = UCG_BUILTIN_PACKER_NAME(_datatype_, part);
+        step->bcopy.pack_single_cb = UCG_BUILTIN_PACKER_NAME(_datatype_, single);
+    } else {
+        step->bcopy.pack_full_cb   = UCG_BUILTIN_PACKER_NAME(_, full);
+        step->bcopy.pack_part_cb   = UCG_BUILTIN_PACKER_NAME(_, part);
+        step->bcopy.pack_single_cb = UCG_BUILTIN_PACKER_NAME(_, single);
+    }
 }
 
 #define UCG_BUILTIN_STEP_RECV_FLAGS (UCG_BUILTIN_OP_STEP_FLAG_RECV_AFTER_SEND |\
@@ -880,6 +886,10 @@ zcopy_redo:
     }
 
     /* Choose the data-related action to be taken by the incoming AM handler */
+    int is_dst_contig = ((ucg_global_params.type_info.mpi_is_contig_f != NULL) &&
+                         (ucg_global_params.type_info.mpi_is_contig_f(params->recv.dt_ext,
+                                                                      params->recv.count)));
+
 #ifdef HAVE_UCT_COLLECTIVES
     int is_incast_used = (phase->iface_attr->cap.flags & UCT_IFACE_FLAG_INCAST) != 0;
 #else
@@ -902,8 +912,12 @@ zcopy_redo:
         } else {
             step->comp_aggregation = UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_REDUCE_SINGLE;
         }
-    } else {
+    } else if (is_dst_contig) {
         step->comp_aggregation = UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_WRITE;
+    } else {
+        step->comp_aggregation = UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_WRITE_UNPACKED;
+        /* If we pack/unpack - we care more about the count than the length */
+        step->unpack_count     = params->recv.count;
     }
 
     /* Choose a completion criteria to be checked by the incoming AM handler */

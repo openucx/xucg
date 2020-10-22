@@ -11,6 +11,8 @@
 #endif
 
 #include "../plan/builtin_plan.h"
+
+#include <ucp/dt/dt.h>
 #include <ucp/core/ucp_request.h>
 #include <ucs/datastruct/ptr_array.h>
 
@@ -97,6 +99,7 @@ enum ucg_builtin_op_step_comp_aggregate {
 
     /* Aggregation of short (Active-)messages */
     UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_WRITE,
+    UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_WRITE_UNPACKED,
     UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_GATHER_TERMINAL,
     UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_GATHER_WAYPOINT,
     UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_REDUCE_SINGLE,
@@ -160,7 +163,10 @@ typedef struct ucg_builtin_op_step {
 
     ucg_builtin_plan_phase_t  *phase;
     int8_t                    *send_buffer;
-    size_t                     buffer_length;
+    union {
+        size_t                 buffer_length;
+        uint64_t               unpack_count;
+    };
     ucg_builtin_header_t       am_header;
     uct_iface_h                uct_iface;
 
@@ -187,6 +193,8 @@ typedef struct ucg_builtin_op_step {
             uct_pack_callback_t  pack_full_cb;
             uct_pack_callback_t  pack_part_cb;
             uct_pack_callback_t  pack_single_cb;
+            ucp_dt_state_t       pack_state;
+            ucp_datatype_t       datatype;
         } bcopy;
         struct {
             uct_mem_h            memh;   /* Data buffer memory handle */
@@ -307,6 +315,9 @@ UCG_BUILTIN_PACKER_DECLARE(_reducing_, part);
 UCG_BUILTIN_PACKER_DECLARE(_variadic_, single);
 UCG_BUILTIN_PACKER_DECLARE(_variadic_, full);
 UCG_BUILTIN_PACKER_DECLARE(_variadic_, part);
+UCG_BUILTIN_PACKER_DECLARE(_datatype_, single);
+UCG_BUILTIN_PACKER_DECLARE(_datatype_, full);
+UCG_BUILTIN_PACKER_DECLARE(_datatype_, part);
 UCG_BUILTIN_PACKER_DECLARE(_atomic_single_, 8);
 UCG_BUILTIN_PACKER_DECLARE(_atomic_single_, 16);
 UCG_BUILTIN_PACKER_DECLARE(_atomic_single_, 32);

@@ -93,7 +93,6 @@ UCG_BUILTIN_VARIADIC_PACK_CB(step->iter_offset, step->buffer_length -
     uint##_integer_bits##_t *ptr = (uint##_integer_bits##_t *)(header + 1); \
     ucs_atomic_add##_integer_bits (ptr, \
             *(uint##_integer_bits##_t *)step->send_buffer); \
-printf("UCG_BUILTIN_ATOMIC_SINGLE_PACK_CB\n");\
     return sizeof(uint##_integer_bits##_t); \
 }
 
@@ -110,7 +109,6 @@ printf("UCG_BUILTIN_ATOMIC_SINGLE_PACK_CB\n");\
         ucs_atomic_add##_integer_bits (ptr, \
                 *(uint##_integer_bits##_t *)step->send_buffer); \
     } \
-printf("UCG_BUILTIN_ATOMIC_MULTIPLE_PACK_CB\n");\
     return length; \
 }
 
@@ -137,3 +135,27 @@ UCG_BUILTIN_ATOMIC_SINGLE_PACK_CB(64)
 
 UCG_BUILTIN_PACKER_DECLARE(_atomic_multiple_, 64)
 UCG_BUILTIN_ATOMIC_MULTIPLE_PACK_CB(64)
+
+#define UCG_BUILTIN_DATATYPE_PACK_CB(_offset, _length) { \
+    ucg_builtin_header_t *header = (ucg_builtin_header_t*)dest; \
+    ucg_builtin_request_t *req   = (ucg_builtin_request_t*)arg; \
+    ucg_builtin_op_step_t *step  = req->step; \
+    size_t buffer_length         = (_length); \
+    header->header               = step->am_header.header; \
+    ucs_assert(((uintptr_t)arg & UCT_PACK_CALLBACK_REDUCE) == 0); \
+    /* Note: worker is NULL since it isn't required for host-based memory */ \
+    return sizeof(*header) + ucp_dt_pack(NULL, step->bcopy.datatype, \
+                                         UCS_MEMORY_TYPE_HOST, header + 1, \
+                                         step->send_buffer + (_offset), \
+                                         &step->bcopy.pack_state, \
+                                         buffer_length); \
+}
+
+UCG_BUILTIN_PACKER_DECLARE(_datatype_, single)
+UCG_BUILTIN_DATATYPE_PACK_CB(0,                 step->buffer_length)
+
+UCG_BUILTIN_PACKER_DECLARE(_datatype_, full)
+UCG_BUILTIN_DATATYPE_PACK_CB(step->iter_offset, step->fragment_length)
+
+UCG_BUILTIN_PACKER_DECLARE(_datatype_, part)
+UCG_BUILTIN_DATATYPE_PACK_CB(step->iter_offset, step->buffer_length - step->iter_offset)
