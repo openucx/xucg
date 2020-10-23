@@ -53,7 +53,6 @@ typedef struct ucg_group {
      * collective types.
      */
     unsigned              cache_size;
-    ucg_plan_t           *barrier_cache;
     ucg_plan_t           *cache[UCG_GROUP_CACHE_MODIFIER_MASK];
 
     /* Below this point - the private per-planner data is allocated/stored */

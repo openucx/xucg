@@ -148,14 +148,15 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_am_handler,
     /* Find the slot to be used, based on the ID received in the header */
     ucg_coll_id_t coll_id = header->msg.coll_id;
     ucg_builtin_comp_slot_t *slot = &gctx->slots[coll_id % UCG_BUILTIN_MAX_CONCURRENT_OPS];
-    ucs_assert((slot->req.latest.coll_id != coll_id) ||
-               (slot->req.latest.step_idx <= header->msg.step_idx));
+    ucs_assert((slot->req.expecting.coll_id != coll_id) ||
+               (slot->req.expecting.step_idx <= header->msg.step_idx));
 
     /* Consume the message if it fits the current collective and step index */
-    if (ucs_likely(header->msg.local_id == slot->req.latest.local_id)) {
+    if (ucs_likely(header->msg.local_id == slot->req.expecting.local_id)) {
         /* Make sure the packet indeed belongs to the collective currently on */
         data    = header + 1;
         length -= sizeof(ucg_builtin_header_t);
+
         ucg_builtin_step_recv_cb(&slot->req, header->remote_offset, data, length);
 
         ucs_trace_req("ucg_builtin_am_handler CB: coll_id %u step_idx %u pending %u",
@@ -164,9 +165,9 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_am_handler,
     }
 
     ucs_trace_req("ucg_builtin_am_handler STORE: group_id %u "
-                  "coll_id %u(%u) step_idx %u slot_step_idx %u",
-                  header->group_id, header->msg.coll_id, slot->req.latest.coll_id,
-                  header->msg.step_idx, slot->req.latest.step_idx);
+                  "coll_id %u expected_id %u step_idx %u expected_idx %u",
+                  header->group_id, header->msg.coll_id, slot->req.expecting.coll_id,
+                  header->msg.step_idx, slot->req.expecting.step_idx);
 
 #ifdef HAVE_UCT_COLLECTIVES
     /* In case of a stride - the stored length is actually longer */
@@ -287,10 +288,32 @@ static ucs_status_t ucg_builtin_create(ucg_plan_ctx_h pctx,
     for (i = 0; i < UCG_BUILTIN_MAX_CONCURRENT_OPS; i++) {
         ucg_builtin_comp_slot_t *slot = &gctx->slots[i];
         ucs_ptr_array_init(&slot->messages, "builtin messages");
-        slot->req.latest.local_id = 0;
+        slot->req.expecting.local_id = 0;
     }
 
     return UCS_OK;
+}
+
+static void ucg_builtin_destroy_plan(ucg_builtin_plan_t *plan)
+{
+    ucs_list_link_t *op_head = &plan->super.op_head;
+    while (!ucs_list_is_empty(op_head)) {
+        ucg_builtin_op_discard(ucs_list_extract_head(op_head, ucg_op_t, list));
+    }
+
+#if ENABLE_DEBUG_DATA || ENABLE_FAULT_TOLERANCE
+    ucg_step_idx_t i;
+    for (i = 0; i < plan->phs_cnt; i++) {
+        ucs_free(plan->phss[i].indexes);
+    }
+#endif
+
+#if ENABLE_MT
+    ucs_recursive_spinlock_destroy(&plan->super.lock);
+#endif
+
+    ucs_mpool_cleanup(&plan->op_mp, 1);
+    ucs_free(plan);
 }
 
 static void ucg_builtin_destroy(ucg_group_ctx_h ctx)
@@ -298,11 +321,12 @@ static void ucg_builtin_destroy(ucg_group_ctx_h ctx)
     /* Cleanup left-over messages and outstanding operations */
     unsigned i, j;
     ucg_builtin_group_ctx_t *gctx = ctx;
+
     for (i = 0; i < UCG_BUILTIN_MAX_CONCURRENT_OPS; i++) {
         ucg_builtin_comp_slot_t *slot = &gctx->slots[i];
-        if (slot->req.latest.local_id != 0) {
+        if (slot->req.expecting.local_id != 0) {
             ucs_warn("Collective operation #%u has been left incomplete (Group #%u)",
-                    gctx->slots[i].req.latest.coll_id, gctx->group_id);
+                    gctx->slots[i].req.expecting.coll_id, gctx->group_id);
         }
 
         ucp_recv_desc_t *rdesc;
@@ -324,28 +348,9 @@ static void ucg_builtin_destroy(ucg_group_ctx_h ctx)
 
     /* Cleanup plans created for this group */
     while (!ucs_list_is_empty(&gctx->plan_head)) {
-        ucg_builtin_plan_t *plan = ucs_list_extract_head(&gctx->plan_head,
-                                                         ucg_builtin_plan_t,
-                                                         list);
-
-        ucs_list_link_t *op_head = &plan->super.op_head;
-        while (!ucs_list_is_empty(op_head)) {
-            ucg_op_t *op = ucs_list_extract_head(op_head, ucg_op_t, list);
-            ucg_builtin_op_discard(op);
-        }
-
-#if ENABLE_DEBUG_DATA || ENABLE_FAULT_TOLERANCE
-        for (j = 0; j < plan->phs_cnt; j++) {
-            ucs_free(plan->phss[j].indexes);
-        }
-#endif
-
-#if ENABLE_MT
-        ucs_recursive_spinlock_destroy(&plan->super.lock);
-#endif
-
-        ucs_mpool_cleanup(&plan->op_mp, 1);
-        ucs_free(plan);
+        ucg_builtin_destroy_plan(ucs_list_extract_head(&gctx->plan_head,
+                                                       ucg_builtin_plan_t,
+                                                       list));
     }
 
     /* Remove the group from the global storage array */
@@ -465,9 +470,9 @@ static ucs_status_t ucg_builtin_plan(ucg_group_ctx_h ctx,
     size_t op_size = sizeof(ucg_builtin_op_t) +
                      (plan->phs_cnt + 1) * sizeof(ucg_builtin_op_step_t);
     /* +1 is for key exchange in 0-copy cases, where an extra step is needed */
-    status = ucs_mpool_init(&plan->op_mp, 0, op_size, 0, UCS_SYS_CACHE_LINE_SIZE,
-                            1, UINT_MAX, &ucg_builtin_plan_mpool_ops,
-                            "ucg_builtin_plan_mp");
+    status = ucs_mpool_init(&plan->op_mp, 0, op_size, offsetof(ucg_op_t, params),
+                            UCS_SYS_CACHE_LINE_SIZE, 1, UINT_MAX,
+                            &ucg_builtin_plan_mpool_ops, "ucg_builtin_plan_mp");
     if (status != UCS_OK) {
         return status;
     }
@@ -512,7 +517,7 @@ void ucg_builtin_print_flags(ucg_builtin_op_step_t *step)
     printf("\n\tFRAGMENTED:\t\t%i", flag);
     if (flag) {
         printf("\n\t - Fragment Length: %u", step->fragment_length);
-        printf("\n\t - Fragments Total: %u", step->fragments_total);
+        printf("\n\t - Fragments Total: %lu", step->fragments_total);
     }
 
     flag = ((step->flags & UCG_BUILTIN_OP_STEP_FLAG_LAST_STEP) != 0);
@@ -530,16 +535,9 @@ void ucg_builtin_print_flags(ucg_builtin_op_step_t *step)
     flag = ((step->flags & UCG_BUILTIN_OP_STEP_FLAG_PACKED_DTYPE_MODE) != 0);
     printf("\n\tPACKED_DTYPE_MODE:\t%i", flag);
     if (flag) {
-        uct_coll_dtype_mode_t mode;
-        if (step->flags & UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_SHORT) {
-            mode = UCT_COLL_DTYPE_MODE_UNPACK_MODE(buffer_length);
-            buffer_length = UCT_COLL_DTYPE_MODE_UNPACK_VALUE(buffer_length);
-        } else {
-            mode = UCT_COLL_DTYPE_MODE_UNPACK_MODE(step->uct_flags);
-            flag = UCT_SEND_FLAG_PACK_LOCK &
-                    UCT_COLL_DTYPE_MODE_UNPACK_VALUE(step->uct_flags);
-            printf("\n\tUCT packing mutex requested:\t\t%i", flag);
-        }
+        uct_coll_dtype_mode_t mode = UCT_COLL_DTYPE_MODE_UNPACK_MODE(buffer_length);
+        buffer_length              = UCT_COLL_DTYPE_MODE_UNPACK_VALUE(buffer_length);
+        ucs_assert(step->flags & UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_SHORT);
 
         printf("\n\tDatatype mode:\t\t");
         switch (mode) {
@@ -575,28 +573,12 @@ void ucg_builtin_print_flags(ucg_builtin_op_step_t *step)
         printf("write");
         break;
 
-    case UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_WRITE_UNPACKED:
-        printf("write (unpacked)");
+    case UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_GATHER:
+        printf("gather");
         break;
 
-    case UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_GATHER_TERMINAL:
-        printf("gather (terminal)");
-        break;
-
-    case UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_GATHER_WAYPOINT:
-        printf("gather (way-point)");
-        break;
-
-    case UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_REDUCE_SINGLE:
-        printf("reduce (single)");
-        break;
-
-    case UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_REDUCE_BATCHED:
-        printf("reduce (batched)");
-        break;
-
-    case UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_REDUCE_FRAGMENT:
-        printf("reduce (fragment)");
+    case UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_REDUCE:
+        printf("reduce");
         break;
 
     case UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_REMOTE_KEY:
@@ -759,11 +741,14 @@ static void ucg_builtin_print(ucg_plan_t *plan,
             int8_t *temp_buffer              = NULL;
             ucg_builtin_op_init_cb_t init_cb = NULL;
             ucg_builtin_op_fini_cb_t fini_cb = NULL;
+
             printf("Step #%i (actual index used: %u):", phase_idx,
                     builtin_plan->phss[phase_idx].step_index);
+
             status = ucg_builtin_step_create(builtin_plan,
                     &builtin_plan->phss[phase_idx], &flags, coll_params,
-                    &temp_buffer, &init_cb, &fini_cb, &step[0], &zcopy_step);
+                    &temp_buffer, 1, 1, 1, &init_cb, &fini_cb,
+                    &step[0], &zcopy_step);
             if (status != UCS_OK) {
                 printf("failed to create, %s", ucs_status_string(status));
             }
@@ -784,13 +769,13 @@ static void ucg_builtin_print(ucg_plan_t *plan,
                 ucg_builtin_print_fini_cb_name(fini_cb);
             }
 
-            ucg_builtin_step_select_packers(coll_params, &step[0]);
+            ucg_builtin_step_select_packers(coll_params, 1, 1, &step[0]);
             printf("\n\tPacker (if used):\t");
             ucg_builtin_print_pack_cb_name(step[0].bcopy.pack_single_cb);
             ucg_builtin_print_flags(&step[0]);
 
             if (zcopy_step) {
-                ucg_builtin_step_select_packers(coll_params, &step[1]);
+                ucg_builtin_step_select_packers(coll_params, 1, 1, &step[1]);
                 printf("\nExtra step - RMA operation:\n\tPacker (if used):\t");
                 ucg_builtin_print_pack_cb_name(step[1].bcopy.pack_single_cb);
                 ucg_builtin_print_flags(&step[1]);
@@ -840,6 +825,7 @@ ucs_status_t ucg_builtin_connect(ucg_builtin_group_ctx_t *ctx,
         mock_ep_attr.cap.flags                 = UCT_IFACE_FLAG_AM_SHORT;
 #endif
         mock_ep_attr.cap.am.max_short          = SIZE_MAX;
+        phase->host_proc_cnt                   = 0;
         phase->iface_attr                      = &mock_ep_attr;
         phase->md                              = NULL;
 
@@ -911,4 +897,3 @@ UCG_PLAN_COMPONENT_DEFINE(ucg_builtin_component, "builtin",
                           ucg_builtin_op_trigger, ucg_builtin_op_discard,
                           ucg_builtin_print, ucg_builtin_handle_fault, "BUILTIN_",
                           ucg_builtin_config_table, ucg_builtin_config_t);
-

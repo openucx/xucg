@@ -18,14 +18,6 @@
                                        UCG_GROUP_PARAM_FIELD_MEMBER_INDEX |\
                                        UCG_GROUP_PARAM_FIELD_CB_CONTEXT)
 
-enum ucg_group_cmp_mode {
-    UCG_GROUP_CMP_MODE_FULL      = 0,
-    UCG_GROUP_CMP_MODE_RECV_ONLY = UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_SEND >> 14,
-    UCG_GROUP_CMP_MODE_SEND_ONLY = UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_RECV >> 14,
-    UCG_GROUP_CMP_MODE_BARRIER   = (UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_SEND |
-                                    UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_RECV) >> 14
-};
-
 #if ENABLE_STATS
 /**
  * UCG group statistics counters
@@ -109,7 +101,7 @@ static inline ucs_status_t ucg_group_plan(ucg_group_h group,
     }
 
     UCS_PROFILE_CODE("ucg_plan") {
-        status = planner->component->plan(gctx, &params->type, &plan);
+        status = planner->component->plan(gctx, &UCG_PARAM_TYPE(params), &plan);
     }
     if (ucs_unlikely(status != UCS_OK)) {
         return status;
@@ -139,37 +131,6 @@ static inline ucs_status_t ucg_group_plan(ucg_group_h group,
     return UCS_OK;
 }
 
-static ucs_status_t ucg_group_init_cache(ucg_group_h group)
-{
-    ucs_status_t status;
-    ucg_collective_params_t coll_params = {
-        .type = {
-            .modifiers = UCG_GROUP_COLLECTIVE_MODIFIER_AGGREGATE   |
-                         UCG_GROUP_COLLECTIVE_MODIFIER_BROADCAST   |
-                         UCG_GROUP_COLLECTIVE_MODIFIER_BARRIER     |
-                         UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_SEND |
-                         UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_RECV,
-            .root      = 0
-        },
-        .comp_cb = NULL
-    };
-
-    /* Clear the cache */
-    group->cache_size = 0;
-    memset(group->cache, 0, sizeof(group->cache));
-
-    /* Create a plan for barrier, so that we can assume it exists in run-time */
-    status = ucg_group_plan(group, &coll_params, &group->barrier_cache);
-    if (ucs_unlikely(status != UCS_OK)) {
-        return status;
-    }
-
-    /* Also plan the non-barrier counter-part - so that fast-path runs right */
-    coll_params.type.modifiers &= UCG_GROUP_CACHE_MODIFIER_MASK;
-    return ucg_group_plan(group, &coll_params,
-                          &group->cache[coll_params.type.modifiers]);
-}
-
 ucs_status_t ucg_group_create(ucp_worker_h worker,
                               const ucg_group_params_t *params,
                               ucg_group_h *group_p)
@@ -194,7 +155,7 @@ ucs_status_t ucg_group_create(ucp_worker_h worker,
     group->is_cache_cleanup_due   = 0;
     group->context                = ctx;
     group->worker                 = worker;
-    group->next_coll_id           = 0;
+    group->next_coll_id           = 1;
     group->iface_cnt              = 0;
 
 #if ENABLE_MT
@@ -227,17 +188,16 @@ ucs_status_t ucg_group_create(ucp_worker_h worker,
         goto cleanup_group;
     }
 
-    status = ucg_group_init_cache(group);
-    if (status != UCS_OK) {
-        goto cleanup_group;
-    }
-
     status = UCS_STATS_NODE_ALLOC(&group->stats,
                                   &ucg_group_stats_class,
                                   worker->stats, "-%p", group);
     if (status != UCS_OK) {
         goto cleanup_group;
     }
+
+    /* Clear the cache */
+    group->cache_size = 0;
+    memset(group->cache, 0, sizeof(group->cache));
 
     ucs_list_add_head(&ctx->groups_head, &group->list);
 
@@ -288,55 +248,6 @@ void ucg_request_cancel(ucg_group_h group, ucg_request_t *req)
     // TODO: implement
 }
 
-static UCS_F_ALWAYS_INLINE int
-ucg_group_is_matching_op(enum ucg_group_cmp_mode mode,
-                         const ucg_collective_params_t *a,
-                         const ucg_collective_params_t *b)
-{
-    size_t cmp_size;
-    size_t cmp_offset;
-
-    switch (mode) {
-    case UCG_GROUP_CMP_MODE_FULL:
-        cmp_size   = sizeof(ucg_collective_params_t);
-        cmp_offset = 0;
-        break;
-
-    case UCG_GROUP_CMP_MODE_SEND_ONLY:
-        cmp_size   = offsetof(ucg_collective_params_t, recv);
-        cmp_offset = 0;
-        break;
-
-    case UCG_GROUP_CMP_MODE_RECV_ONLY:
-        cmp_size   = sizeof(ucg_collective_params_t) -
-                     offsetof(ucg_collective_params_t, recv);
-        cmp_offset = offsetof(ucg_collective_params_t, recv);
-        break;
-
-    case UCG_GROUP_CMP_MODE_BARRIER:
-        /* Barrier only - has a different solution... will never get here */
-        ucs_assert_always(0);
-        break;
-    }
-
-    ucs_assert((mode == UCG_GROUP_CMP_MODE_RECV_ONLY) ||
-               ((a->recv_only.type.modifiers == 0) &&
-                (b->recv_only.type.modifiers == 0) &&
-                (a->recv_only.type.root == 0)      &&
-                (b->recv_only.type.root == 0)      &&
-                (a->recv_only.comp_cb == 0)        &&
-                (b->recv_only.comp_cb == 0)));
-
-    ucs_assert(((uintptr_t)a % UCS_SYS_CACHE_LINE_SIZE) == 0);
-    ucs_assert(((uintptr_t)b % UCS_SYS_CACHE_LINE_SIZE) == 0);
-    ucs_assert((cmp_size     % UCS_SYS_CACHE_LINE_SIZE) == 0);
-    ucs_assert((cmp_offset   % UCS_SYS_CACHE_LINE_SIZE) == 0);
-
-    return (0 == memcmp((uint8_t*)a + cmp_offset,
-                        (uint8_t*)b + cmp_offset,
-                        cmp_size));
-}
-
 UCS_PROFILE_FUNC(ucs_status_t, ucg_collective_create,
         (group, params, coll), ucg_group_h group,
         const ucg_collective_params_t *params, ucg_coll_h *coll)
@@ -344,82 +255,42 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_collective_create,
     ucg_op_t *op;
     ucs_status_t status;
 
-    uint16_t modifiers               = params->type.modifiers;
-    unsigned coll_mask               = modifiers & UCG_GROUP_CACHE_MODIFIER_MASK;
-    ucg_plan_t *plan                 = group->cache[coll_mask];
-    unsigned cmp_bit_offset          = ucs_count_trailing_zero_bits(
-                                       UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_SEND);
-    enum ucg_group_cmp_mode cmp_mode = (enum ucg_group_cmp_mode)(modifiers >>
-                                                                 cmp_bit_offset);
-
+    uint16_t modifiers = UCG_PARAM_TYPE(params).modifiers;
+    unsigned coll_mask = modifiers & UCG_GROUP_CACHE_MODIFIER_MASK;
+    ucg_plan_t *plan   = group->cache[coll_mask];
 
     /* check the recycling/cache for this collective */
     if (ucs_likely(plan != NULL)) {
 
         UCG_GROUP_THREAD_CS_ENTER(plan)
 
-        switch (cmp_mode) {
-        case UCG_GROUP_CMP_MODE_FULL:
-            ucs_list_for_each(op, &plan->op_head, list) {
-                if (ucg_group_is_matching_op(UCG_GROUP_CMP_MODE_FULL,
-                                             &op->params, params)) {
-                    ucs_list_del(&op->list);
-                    UCG_GROUP_THREAD_CS_EXIT(plan);
-                    status = UCS_OK;
-                    goto op_found;
-                }
-            }
-            break;
+        ucs_list_for_each(op, &plan->op_head, list) {
+            /* we only need to compare the first 64 bytes of each set of cached
+             * parameters against the given one (checked during compile time) */
+            UCS_STATIC_ASSERT(sizeof(ucg_collective_params_t) ==
+                              UCS_SYS_CACHE_LINE_SIZE);
 
-        case UCG_GROUP_CMP_MODE_SEND_ONLY:
-            ucs_list_for_each(op, &plan->op_head, list) {
-                if (ucg_group_is_matching_op(UCG_GROUP_CMP_MODE_SEND_ONLY,
-                                             &op->params, params)) {
-                    ucs_list_del(&op->list);
-                    UCG_GROUP_THREAD_CS_EXIT(plan);
-                    status = UCS_OK;
-                    goto op_found;
-                }
-            }
-            break;
-
-        case UCG_GROUP_CMP_MODE_RECV_ONLY:
-            ucs_list_for_each(op, &plan->op_head, list) {
-                if (ucg_group_is_matching_op(UCG_GROUP_CMP_MODE_RECV_ONLY,
-                                             &op->params, params)) {
-                    ucs_list_del(&op->list);
-                    UCG_GROUP_THREAD_CS_EXIT(plan);
-                    status = UCS_OK;
-                    goto op_found;
-                }
-            }
-            break;
-
-        case UCG_GROUP_CMP_MODE_BARRIER:
-            /* No need to look for a match - barrier is pre-calculated */
-            plan = group->barrier_cache;
-            if (ucs_likely(!ucs_list_is_empty(&plan->op_head))) {
-                op = ucs_list_extract_head(&plan->op_head, ucg_op_t, list);
+            if (ucs_cpu_cache_line_is_equal(params, &op->params)) {
+                ucs_list_del(&op->list);
                 UCG_GROUP_THREAD_CS_EXIT(plan);
                 status = UCS_OK;
                 goto op_found;
             }
-            break;
         }
-
-        UCG_GROUP_THREAD_CS_EXIT(plan);
 
         UCS_STATS_UPDATE_COUNTER(group->stats, UCG_GROUP_STAT_PLANS_USED, 1);
     } else {
-        ucs_assert((modifiers & UCG_GROUP_COLLECTIVE_MODIFIER_BARRIER) == 0);
         ucs_trace_req("ucg_collective_create PLAN: type=%x root=%"PRIx64,
-                      params->type.modifiers, (uint64_t)params->type.root);
+                      (unsigned)UCG_PARAM_TYPE(params).modifiers,
+                      (uint64_t)UCG_PARAM_TYPE(params).root);
 
         /* create the actual plan for the collective operation */
         status = ucg_group_plan(group, params, &plan);
         if (status != UCS_OK) {
             goto out;
         }
+
+        UCG_GROUP_THREAD_CS_ENTER(plan);
 
         group->cache[coll_mask] = plan;
 
@@ -431,22 +302,22 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_collective_create,
     UCS_PROFILE_CODE("ucg_prepare") {
         status = plan->planner->component->prepare(plan, params, &op);
     }
+
+    UCG_GROUP_THREAD_CS_EXIT(plan);
+
     if (status != UCS_OK) {
         goto out;
     }
 
     ucs_trace_req("ucg_collective_create OP: planner=%s(%s) "
-                  "params={type=%u, root=%lu, send=[%p,%lu,%lu,%p,%p], "
-                  "recv=[%p,%lu,%lu,%p,%p], cb=%p(%p), op=%p}",
+                  "params={type=%u, root=%lu, send=[%p,%lu,%p], "
+                  "recv=[%p,%lu,%p], op/displs=%p}",
                   plan->planner->name, plan->planner->component->name,
-                  (uint16_t)params->type.modifiers,
-                  (uint64_t)params->type.root, params->send.buffer,
-                  params->send.count, params->send.dt_len,
-                  params->send.dt_ext, params->send.displs,
-                  params->recv.buffer, params->recv.count, params->recv.dt_len,
-                  params->recv.dt_ext, params->recv.displs,
-                  params->comp_cb, params->recv_only.comp_cb,
-                  params->recv.op_ext);
+                  (uint16_t)UCG_PARAM_TYPE(params).modifiers,
+                  (uint64_t)UCG_PARAM_TYPE(params).root,
+                  params->send.buffer, params->send.count, params->send.dtype,
+                  params->recv.buffer, params->recv.count, params->recv.dtype,
+                  UCG_PARAM_OP(params));
 
     if (ucs_unlikely(++group->cache_size >
                      group->context->config.group_cache_size_thresh)) {
@@ -457,8 +328,6 @@ op_found:
     *coll = op;
 
 out:
-    UCG_GROUP_THREAD_CS_EXIT(group)
-
     return status;
 }
 
@@ -469,7 +338,7 @@ ucg_collective_trigger(ucg_group_h group, ucg_op_t *op, ucg_request_t *req)
 
     /* Start the first step of the collective operation */
     UCS_PROFILE_CODE("ucg_trigger") {
-        ret = op->trigger_f(op, ++group->next_coll_id, req);
+        ret = op->trigger_f(op, group->next_coll_id++, req);
     }
 
     if (ret != UCS_INPROGRESS) {
@@ -488,27 +357,28 @@ ucs_status_t ucg_collective_acquire_barrier(ucg_group_h group)
 
 ucs_status_t ucg_collective_release_barrier(ucg_group_h group)
 {
+    ucs_status_t status;
+
     ucs_assert(group->is_barrier_outstanding == 1);
     group->is_barrier_outstanding = 0;
 
     UCG_GROUP_THREAD_CS_ENTER(group)
 
-    if (ucs_queue_is_empty(&group->pending)) {
-        return UCS_OK;
+    if (!ucs_queue_is_empty(&group->pending)) {
+        do {
+            /* Start the next pending operation */
+            ucg_op_t *op = (ucg_op_t*)ucs_queue_pull_non_empty(&group->pending);
+            status = ucg_collective_trigger(group, op, op->pending_req);
+        } while ((!ucs_queue_is_empty(&group->pending)) &&
+                 (!group->is_barrier_outstanding) &&
+                 (status == UCS_OK));
+    } else {
+        status = UCS_OK;
     }
-
-    ucs_status_t ret;
-    do {
-        /* Start the next pending operation */
-        ucg_op_t *op = (ucg_op_t*)ucs_queue_pull_non_empty(&group->pending);
-        ret = ucg_collective_trigger(group, op, op->pending_req);
-    } while ((!ucs_queue_is_empty(&group->pending)) &&
-             (!group->is_barrier_outstanding) &&
-             (ret == UCS_OK));
 
     UCG_GROUP_THREAD_CS_EXIT(group)
 
-    return ret;
+    return status;
 }
 
 UCS_PROFILE_FUNC(ucs_status_t, ucg_collective_start, (coll, req),
@@ -546,9 +416,9 @@ void ucg_collective_destroy(ucg_coll_h coll)
     ucg_op_t *op     = (ucg_op_t*)coll;
     ucg_plan_t *plan = op->plan;
 
-    ucs_recursive_spin_lock(&plan->lock);
+    UCG_GROUP_THREAD_CS_ENTER(plan);
 
     ucs_list_add_head(&plan->op_head, &op->list);
 
-    ucs_recursive_spin_unlock(&plan->lock);
+    UCG_GROUP_THREAD_CS_EXIT(plan);
 }

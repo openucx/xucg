@@ -132,13 +132,12 @@ struct ucg_op {
 
     ucg_plan_t              *plan;        /**< The group this belongs to */
 
-    uint8_t                  padding[24];
-
     ucg_collective_params_t  params;      /**< original parameters for it */
+    /* Note: the params field must be 64-byte-aligned */
 
     /* Component-specific request content */
     char                     priv[0];
-} UCS_V_ALIGNED(64); /* so that params struct is aligned correctly */
+};
 
 struct ucg_plan_component {
     const char                     name[UCG_PLAN_COMPONENT_NAME_MAX];  /**< Component name */

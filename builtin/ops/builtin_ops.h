@@ -89,49 +89,52 @@ enum ucg_builtin_op_step_flags {
     UCG_BUILTIN_OP_STEP_FLAG_SWITCH_MASK       = UCS_MASK(15),
 
     /* Additional step information */
-    UCG_BUILTIN_OP_STEP_FLAG_TEMP_BUFFER_USED  = UCS_BIT(15),
-    UCG_BUILTIN_OP_STEP_FLAG_PACKED_DTYPE_MODE = UCS_BIT(16),
-    UCG_BUILTIN_OP_STEP_FLAG_FT_ONGOING        = UCS_BIT(17)
+    UCG_BUILTIN_OP_STEP_FLAG_BCOPY_PACK_LOCK   = UCS_BIT(15),
+    UCG_BUILTIN_OP_STEP_FLAG_TEMP_BUFFER_USED  = UCS_BIT(16),
+    UCG_BUILTIN_OP_STEP_FLAG_PACKED_DTYPE_MODE = UCS_BIT(17),
+    UCG_BUILTIN_OP_STEP_FLAG_FT_ONGOING        = UCS_BIT(18),
+    UCG_BUILTIN_OP_STEP_FLAG_RESERVED          = UCS_BIT(19)
 };
 
-enum ucg_builtin_op_step_comp_aggregate {
-    UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_NOP,
+enum ucg_builtin_op_step_comp_aggregation {
+    UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_NOP = 0,
 
     /* Aggregation of short (Active-)messages */
     UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_WRITE,
-    UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_WRITE_UNPACKED,
-    UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_GATHER_TERMINAL,
-    UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_GATHER_WAYPOINT,
-    UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_REDUCE_SINGLE,
-    UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_REDUCE_BATCHED,
-    UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_REDUCE_FRAGMENT,
+    UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_GATHER,
+    UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_REDUCE,
 
     /* Unpacking remote memory keys (for Rendezvous protocol) */
     UCG_BUILTIN_OP_STEP_COMP_AGGREGATE_REMOTE_KEY
-} UCS_S_PACKED;
+}; /* Note: only 3 bits are allocated for this field in ucg_builtin_op_step_t */
+
+enum ucg_builtin_op_step_comp_flags {
+    UCG_BUILTIN_OP_STEP_COMP_FLAG_BATCHED_DATA    = UCS_BIT(0),
+    UCG_BUILTIN_OP_STEP_COMP_FLAG_FRAGMENTED_DATA = UCS_BIT(1),
+    UCG_BUILTIN_OP_STEP_COMP_FLAG_PACKED_LENGTH   = UCS_BIT(2),
+    UCG_BUILTIN_OP_STEP_COMP_FLAG_PACKED_DATATYPE = UCS_BIT(3)
+}; /* Note: only 4 bits are allocated for this field in ucg_builtin_op_step_t */
 
 enum ucg_builtin_op_step_comp_criteria {
-    UCG_BUILTIN_OP_STEP_COMP_CRITERIA_SEND,
+    UCG_BUILTIN_OP_STEP_COMP_CRITERIA_SEND = 0,
     UCG_BUILTIN_OP_STEP_COMP_CRITERIA_SINGLE_MESSAGE,
     UCG_BUILTIN_OP_STEP_COMP_CRITERIA_MULTIPLE_MESSAGES,
     UCG_BUILTIN_OP_STEP_COMP_CRITERIA_MULTIPLE_MESSAGES_ZCOPY,
     UCG_BUILTIN_OP_STEP_COMP_CRITERIA_BY_FRAGMENT_OFFSET
-} UCS_S_PACKED;
+}; /* Note: only 3 bits are allocated for this field in ucg_builtin_op_step_t */
 
 enum ucg_builtin_op_step_comp_action {
-    UCG_BUILTIN_OP_STEP_COMP_OP,
+    UCG_BUILTIN_OP_STEP_COMP_OP = 0,
     UCG_BUILTIN_OP_STEP_COMP_STEP,
     UCG_BUILTIN_OP_STEP_COMP_SEND
-} UCS_S_PACKED;
+}; /* Note: only 2 bits are allocated for this field in ucg_builtin_op_step_t */
 
 /* Definitions of several callback functions, used during an operation */
 typedef struct ucg_builtin_op ucg_builtin_op_t;
 typedef struct ucg_builtin_request ucg_builtin_request_t;
 typedef void         (*ucg_builtin_op_init_cb_t)  (ucg_builtin_op_t *op,
                                                    ucg_coll_id_t coll_id);
-typedef void         (*ucg_builtin_op_fini_cb_t)  (ucg_builtin_op_t *op,
-                                                   ucg_request_t *user_req,
-                                                   ucs_status_t status);
+typedef void         (*ucg_builtin_op_fini_cb_t)  (ucg_builtin_op_t *op);
 typedef ucs_status_t (*ucg_builtin_op_optm_cb_t)  (ucg_builtin_op_t *op);
 
 typedef struct ucg_builtin_zcomp {
@@ -140,38 +143,40 @@ typedef struct ucg_builtin_zcomp {
 } ucg_builtin_zcomp_t;
 
 typedef struct ucg_builtin_op_step {
-    uint32_t                   flags;       /* @ref ucg_builtin_op_step_flags */
+    enum ucg_builtin_op_step_flags            flags            :20;
+    enum ucg_builtin_op_step_comp_flags       comp_flags       :4;
+    enum ucg_builtin_op_step_comp_aggregation comp_aggregation :3;
+    enum ucg_builtin_op_step_comp_criteria    comp_criteria    :3;
+    enum ucg_builtin_op_step_comp_action      comp_action      :2;
+
+    /* --- 4 bytes --- */
+
     uint8_t                    iter_ep;     /* iterator, somewhat volatile */
 #define UCG_BUILTIN_OFFSET_PIPELINE_READY   ((ucg_offset_t)-1)
 #define UCG_BUILTIN_OFFSET_PIPELINE_PENDING ((ucg_offset_t)-2)
     /* TODO: consider modifying "send_buffer" and removing iter_offset */
 
-    /* These values determine the behavior of the incoming message handler */
-    enum ucg_builtin_op_step_comp_aggregate comp_aggregation;
-    enum ucg_builtin_op_step_comp_criteria  comp_criteria;
-    enum ucg_builtin_op_step_comp_action    comp_action;
-    /* --- 8 bytes --- */
-
-    uint8_t                    uct_flags; /* e.g. UCT_SEND_FLAG_PACK_LOCK */
     uint8_t                    am_id;
     uint8_t                    ep_cnt;
     uint8_t                    batch_cnt;
 
-    ucg_offset_t               iter_offset; /* iterator, somewhat volatile */
-
-    /* --- 16 bytes --- */
+    /* --- 8 bytes --- */
 
     ucg_builtin_plan_phase_t  *phase;
     int8_t                    *send_buffer;
     union {
         size_t                 buffer_length;
-        uint64_t               unpack_count;
+        size_t                 dtype_length;
     };
+
+    /* --- 32 bytes --- */
+
     ucg_builtin_header_t       am_header;
     uct_iface_h                uct_iface;
 
-    uint32_t                   fragments_total; /* != 1 for fragmented operations */
+    uint64_t                   fragments_total; /* != 1 for fragmented operations */
     uint32_t                   fragment_length; /* only for fragmented operations */
+    ucg_offset_t               iter_offset;     /* iterator, somewhat volatile */
 
     /* --- 64 bytes --- */
 
@@ -193,8 +198,6 @@ typedef struct ucg_builtin_op_step {
             uct_pack_callback_t  pack_full_cb;
             uct_pack_callback_t  pack_part_cb;
             uct_pack_callback_t  pack_single_cb;
-            ucp_dt_state_t       pack_state;
-            ucp_datatype_t       datatype;
         } bcopy;
         struct {
             uct_mem_h            memh;   /* Data buffer memory handle */
@@ -204,7 +207,7 @@ typedef struct ucg_builtin_op_step {
             uct_rkey_bundle_t    rkey;   /* remote key (from previous step) */
         } zcopy;
     };
-} UCS_S_PACKED UCS_V_ALIGNED(sizeof(void*)) ucg_builtin_op_step_t;
+} UCS_S_PACKED UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) ucg_builtin_op_step_t;
 
 typedef struct ucg_builtin_comp_slot ucg_builtin_comp_slot_t;
 struct ucg_builtin_op {
@@ -213,6 +216,10 @@ struct ucg_builtin_op {
     ucg_builtin_op_optm_cb_t optm_cb; /**< optimization function for the operation */
     ucg_builtin_op_init_cb_t init_cb; /**< Initialization function for the operation */
     ucg_builtin_op_fini_cb_t fini_cb; /**< Finalization function for the operation */
+    ucp_datatype_t           send_dt; /**< Generic send datatype (if non-contig) */
+    ucp_datatype_t           recv_dt; /**< Generic receive datatype (if non-contig) */
+    ucp_dt_state_t           rstate;  /**< read (send) state - for datatype packing */
+    ucp_dt_state_t           wstate;  /**< write (recieve) state - for datatype unpacking */
     ucg_builtin_comp_slot_t *slots;   /**< slots pointer, for faster initialization */
     ucg_builtin_op_step_t    steps[]; /**< steps required to complete the operation */
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE);
@@ -223,7 +230,7 @@ struct ucg_builtin_op {
  */
 struct ucg_builtin_request {
     volatile uint32_t         pending;   /**< number of step's pending messages */
-    ucg_builtin_header_step_t latest;    /**< request iterator, mostly here for
+    ucg_builtin_header_step_t expecting; /**< request iterator, mostly here for
                                               alignment reasons with slot structs */
     ucg_builtin_op_step_t    *step;      /**< indicator of current step within the op */
     ucg_builtin_op_t         *op;        /**< operation currently running */
@@ -250,6 +257,9 @@ ucs_status_t ucg_builtin_step_create(ucg_builtin_plan_t *plan,
                                      enum ucg_builtin_op_step_flags *flags,
                                      const ucg_collective_params_t *params,
                                      int8_t **current_data_buffer,
+                                     int is_send_dt_contig,
+                                     int is_recv_dt_contig,
+                                     size_t send_dt_len,
                                      ucg_builtin_op_init_cb_t *init_cb,
                                      ucg_builtin_op_fini_cb_t *fini_cb,
                                      ucg_builtin_op_step_t *step,
@@ -269,8 +279,10 @@ ucs_status_t ucg_builtin_op_select_callback(ucg_builtin_plan_t *plan,
 ucs_status_t ucg_builtin_op_consider_optimization(ucg_builtin_op_t *op,
                                                   ucg_builtin_config_t *config);
 
-void ucg_builtin_step_select_packers(const ucg_collective_params_t *params,
-                                     ucg_builtin_op_step_t *step);
+ucs_status_t ucg_builtin_step_select_packers(const ucg_collective_params_t *params,
+                                             size_t send_dt_len,
+                                             int is_send_dt_contig,
+                                             ucg_builtin_op_step_t *step);
 
 ucs_status_t ucg_builtin_am_handler(void *worker, void *data, size_t length,
                                     unsigned am_flags);

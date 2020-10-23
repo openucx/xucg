@@ -66,8 +66,8 @@ enum ucg_params_field {
     UCG_PARAM_FIELD_JOB_UID      = UCS_BIT(0), /**< Unique ID for this job */
     UCG_PARAM_FIELD_ADDRESS_CB   = UCS_BIT(1), /**< Peer address lookup */
     UCG_PARAM_FIELD_NEIGHBORS_CB = UCS_BIT(2), /**< Neighborhood info */
-    UCG_PARAM_FIELD_REDUCE_CB    = UCS_BIT(3), /**< Callback for reduce ops */
-    UCG_PARAM_FIELD_TYPE_INFO_CB = UCS_BIT(4), /**< Operation/datatype info */
+    UCG_PARAM_FIELD_DATATYPE_CB  = UCS_BIT(3), /**< Callback for datatypes */
+    UCG_PARAM_FIELD_REDUCE_OP_CB = UCS_BIT(4), /**< Callback for reduce ops */
     UCG_PARAM_FIELD_MPI_IN_PLACE = UCS_BIT(5), /**< MPI_IN_PLACE value */
     UCG_PARAM_FIELD_HANDLE_FAULT = UCS_BIT(6)  /**< Fault-tolerance support */
 };
@@ -124,36 +124,39 @@ typedef struct ucg_params {
                               ucg_group_member_index_t *out);
     } neighbors;
 
-    /*
-     * To support any type of reduction for an MPI implementation, this callback
-     * function can be called (when a new message arrives) to reduce the data
-     * into a buffer (which already contains a partial result). Below are some
-     * additional functions to detect the type of reduction, so that simple
-     * reductions (e.g. sum on integers) doesn't require using this callback.
-     */
-    void (*reduce_cb_f)(void *reduce_op,
-                        char *src,
-                        char *dst,
-                        unsigned count,
-                        void *datatype);
-
-    /* Basic MPI Operation type and data-type information - using callbacks */
+    /* Information about datatypes */
     struct {
-        /* Convert the opaque data-type into UCX's structure */
-        int (*datatype_convert)(void *datatype, ucp_datatype_t **ucp_datatype);
+        /* Convert the opaque data-type into UCX's structure (should return 0) */
+        int (*convert)(void *datatype, ucp_datatype_t *ucp_datatype);
 
-        /* Check to determine if an MPI data-type is an integer (of any length) */
-        int (*datatype_is_integer_f)(void *datatype);
+        /* Check if the data-type is an integer (of any length) */
+        int (*is_integer_f)(void *datatype, int *is_signed);
 
-        /* Check to determine if an MPI data-type is a floating-point (of any length) */
-        int (*datatype_is_floating_point_f)(void *datatype);
+        /* Check if the data-type is a floating-point (of any length) */
+        int (*is_floating_point_f)(void *datatype);
+    } datatype;
 
-        /* Check to determine if an MPI reduction operation is MPI_SUM */
-        int (*reduce_op_is_sum_f)(void *reduce_op);
+    /* Information about reduction operations */
+    struct {
+        /*
+         * To support any type of reduction for an MPI implementation, this callback
+         * function can be called (when a new message arrives) to reduce the data
+         * into a buffer (which already contains a partial result). Below are some
+         * additional functions to detect the type of reduction, so that simple
+         * reductions (e.g. sum on integers) doesn't require using this callback.
+         */
+        int (*reduce_cb_f)(void *reduce_op, char *src, char *dst,
+                           unsigned count, void *datatype);
 
-        /* Check to determine if an MPI reduction operation is MPI_MINLOC/MAXLOC */
-        int (*reduce_op_is_loc_f)(void *reduce_op);
-    } type_info;
+        /* Check if the reduction operation is a summation (e.g. MPI_SUM) */
+        int (*is_sum_f)(void *reduce_op);
+
+        /* Check if the reduction also expects a location (e.g. MPI_MINLOC) */
+        int (*is_loc_expected_f)(void *reduce_op);
+
+        /* Check if the reduction operation is commutative (e.g. MPI_MINLOC) */
+        int (*is_commutative_f)(void *reduce_op);
+    } reduce_op;
 
     /* The value of MPI_IN_PLACE, which can replace send or receive buffers */
     void* mpi_in_place;
@@ -207,8 +210,6 @@ enum ucg_collective_modifiers {
     UCG_GROUP_COLLECTIVE_MODIFIER_SYMMETRIC          = UCS_BIT(11), /* persistent on all ranks */
     UCG_GROUP_COLLECTIVE_MODIFIER_BARRIER            = UCS_BIT(12), /* prevent others from starting */
     UCG_GROUP_COLLECTIVE_MODIFIER_MOCK_EPS           = UCS_BIT(13), /* information gathering only */
-    UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_SEND        = UCS_BIT(14), /* recv-only optimization */
-    UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_RECV        = UCS_BIT(15)  /* send-only optimization */
 };
 
 /**
@@ -321,53 +322,36 @@ typedef struct ucg_group_params {
  * are accessed during run-time.
  */
 typedef struct ucg_collective {
-    ucg_collective_type_t     type;    /**< type and root of the collective */
-    ucg_collective_callback_t comp_cb; /**< collective completion callback */
-    /*
-     * Note: this callback will be called after UCG has finished all the work
-     *       in the scope of this collective, the outcome is available in the
-     *       output buffers (if applicable), and the user's request structure
-     *       contains the resulting UCG status code. However, the "COMPLETED"
-     *       flag in the user's request structure will only be set after this
-     *       callback function has returned (if not NULL), so the user should
-     *       not rely on the "flags" field in the request structure inside the
-     *       callback context.
-     */
-
     struct {
-        void                 *buffer;  /**< buffer location to use */
         union {
-            int64_t           count;   /**< item count (not int - to consume space) */
-            const int        *counts;  /**< item count array */
+            /* only in "send" (see @ref UCG_PARAM_TYPE ) */
+            ucg_collective_type_t type;   /**< type and root of the collective */
+
+            /* only in "recv" (see @ref UCG_PARAM_OP , @ref UCG_PARAM_DISPLS ) */
+            void                 *op;     /**< external reduce operation handle */
+            const int            *displs; /**< item displacement array */
+        };
+        void                     *buffer;  /**< buffer location to use */
+        union {
+            int64_t               count;   /**< item count (not int - for OSHMEM) */
+            const int            *counts;  /**< item count array */
         };
         union {
-            size_t            dt_len;  /**< external datatype length */
-            size_t           *dts_len; /**< external datatype length array */
+            void                 *dtype;   /**< external data-type context */
+            void                 *dtypes;  /**< external data-type context array */
+            /*
+             * Note: if UCG_PARAM_FIELD_DATATYPE_CB is not passed during UCG
+             *       initialization, UCG will assume that dtype is already a
+             *       UCP datatype (will perform static cast to ucp_datatpe_t)
+             *       and dtypes points to an array of such UCP datatpes.
+             */
         };
-        union {
-            void             *dt_ext;  /**< external datatype context */
-            void             *dts_ext; /**< external datatype context array */
-        };
-        union {
-            size_t            stride;  /**< item stride */
-            const int        *displs;  /**< item displacement array */
-            void             *op_ext;  /**< external reduce operation handle */
-        };
-        uint64_t              reserved; /**< unused except padding, must be zero */
     } send, recv;
-
-    /*
-     * Below is an optimization: only for "recv-only" collectives, where @ref
-     * UCG_GROUP_COLLECTIVE_MODIFIER_IGNORE_SEND is set, the fields below
-     * override the value of the original tyep and completion collback. If the
-     * flag is not set - both must be set to zero.
-     */
-    struct {
-        ucg_collective_type_t     type;
-        ucg_collective_callback_t comp_cb;
-    } recv_only;
 } UCS_S_PACKED UCS_V_ALIGNED(64) ucg_collective_params_t;
-/* Note: UCS_SYS_CACHE_LINE_SIZE is not visible here, so 64 is a good guess */
+
+#define UCG_PARAM_TYPE(_params)   (_params)->send.type
+#define UCG_PARAM_OP(_params)     (_params)->recv.op
+#define UCG_PARAM_DISPLS(_params) (_params)->recv.displs
 
 /**
  * @ingroup UCG_GROUP
@@ -390,8 +374,8 @@ enum ucg_request_common_flags {
  * are accessed during run-time.
  */
 typedef struct ucg_request {
-    volatile uint32_t        flags;      /**< @ref ucg_request_common_flags */
-    volatile ucs_status_t    status;     /**< Operation status */
+    volatile uint32_t flags;  /**< @ref ucg_request_common_flags */
+    ucs_status_t      status; /**< Operation status */
 } ucg_request_t;
 
 

@@ -133,11 +133,18 @@ ucg_builtin_step_am_bcopy_one(ucg_builtin_request_t *req,
                               ucg_builtin_op_step_t *step,
                               uct_ep_h ep, int var_stride)
 {
+    unsigned uct_flags;
+    if (ucs_unlikely(step->flags & UCG_BUILTIN_OP_STEP_FLAG_BCOPY_PACK_LOCK)) {
+        uct_flags = UCT_SEND_FLAG_PACK_LOCK;
+    } else {
+        uct_flags = 0;
+    }
+
     UCG_BUILTIN_ASSERT_SEND(step, AM_BCOPY);
 
     ssize_t len = step->uct_iface->ops.ep_am_bcopy(ep, step->am_id,
                                                    step->bcopy.pack_single_cb,
-                                                   req, step->uct_flags);
+                                                   req, uct_flags);
 
     return (ucs_unlikely(len < 0)) ? (ucs_status_t)len : UCS_OK;
 }
@@ -153,6 +160,13 @@ ucg_builtin_step_am_bcopy_max(ucg_builtin_request_t *req,
     ucg_offset_t iter_limit = step->buffer_length - frag_size;
     packed_send_t send_func = step->uct_iface->ops.ep_am_bcopy;
 
+    unsigned uct_flags;
+    if (ucs_unlikely(step->flags & UCG_BUILTIN_OP_STEP_FLAG_BCOPY_PACK_LOCK)) {
+        uct_flags = UCT_SEND_FLAG_PACK_LOCK;
+    } else {
+        uct_flags = 0;
+    }
+
     UCG_BUILTIN_ASSERT_SEND(step, AM_BCOPY);
     ucs_assert(step->iter_offset != UCG_BUILTIN_OFFSET_PIPELINE_READY);
     ucs_assert(step->iter_offset != UCG_BUILTIN_OFFSET_PIPELINE_PENDING);
@@ -161,7 +175,7 @@ ucg_builtin_step_am_bcopy_max(ucg_builtin_request_t *req,
     if (ucs_likely(step->iter_offset < iter_limit)) {
         /* send every fragment but the last */
         do {
-            len = send_func(ep, am_id, step->bcopy.pack_full_cb, req, step->uct_flags);
+            len = send_func(ep, am_id, step->bcopy.pack_full_cb, req, uct_flags);
 
             if (is_pipelined) {
                 return ucs_unlikely(len < 0) ? (ucs_status_t)len : UCS_OK;
@@ -179,7 +193,7 @@ ucg_builtin_step_am_bcopy_max(ucg_builtin_request_t *req,
     }
 
     /* Send last fragment of the message */
-    len = send_func(ep, am_id, step->bcopy.pack_part_cb, req, step->uct_flags);
+    len = send_func(ep, am_id, step->bcopy.pack_part_cb, req, uct_flags);
     if (ucs_unlikely(len < 0)) {
         return (ucs_status_t)len;
     }
@@ -604,8 +618,8 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_step_execute, (req),
     }
 
     /* Initialize the users' request object, if applicable */
-    slot->req.latest.local_id = step->am_header.msg.local_id;
-    ucs_assert(slot->req.latest.local_id != 0);
+    slot->req.expecting.local_id = step->am_header.msg.local_id;
+    ucs_assert(slot->req.expecting.local_id != 0);
     return ucg_builtin_step_check_pending(slot);
 
     /************************** Error flows ***********************************/

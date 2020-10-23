@@ -45,17 +45,9 @@ static inline ucs_status_t ucg_builtin_tree_connect_phase(ucg_builtin_plan_phase
 flagless_retry:
         peer = peers[0];
 #ifdef HAVE_UCT_COLLECTIVES
-        if (coll_flags & (UCG_PLAN_CONNECT_FLAG_WANT_INCAST |
-                          UCG_PLAN_CONNECT_FLAG_WANT_BCAST)) {
-            /* For some methods, e.g. REDUCE_TERMINAL, the peer is the message
-             * source and not the destination, so we need to switch to "loopback" */
-            if (((coll_flags & UCG_PLAN_CONNECT_FLAG_WANT_INCAST) &&
-                 (method != UCG_PLAN_METHOD_SEND_TO_SM_ROOT) &&
-                 (method != UCG_PLAN_METHOD_SEND_TERMINAL)) ||
-                ((coll_flags & UCG_PLAN_CONNECT_FLAG_WANT_BCAST) &&
-                 (method != UCG_PLAN_METHOD_RECV_TERMINAL))) {
-                peer = params->root; /* Should be myself... TODO: validate! */
-            }
+        if ((peer_cnt > 1) && (coll_flags & (UCG_PLAN_CONNECT_FLAG_WANT_INCAST |
+                                             UCG_PLAN_CONNECT_FLAG_WANT_BCAST))) {
+            peer = params->group_params->member_index;
         }
 #endif
 
@@ -69,7 +61,7 @@ flagless_retry:
         }
 #endif
 
-        if ((status != UCS_ERR_UNREACHABLE) || !coll_flags) {
+        if ((status != UCS_ERR_UNREACHABLE) || (peer_cnt == 1)) {
             return status;
         } else if (coll_flags) {
             /* retry - without the flags */
@@ -195,8 +187,8 @@ ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
         /* If I have a host-level or network-level parent (it was added to
          * the end of the host-array) - now is the time to discard it by
          * decrementing the counter for each host-array */
-        if (net_down_cnt) net_down_cnt--;
-        if (host_down_cnt) host_down_cnt--;
+        if (net_up_cnt) net_down_cnt--;
+        if (host_up_cnt) host_down_cnt--;
         /* conditional break */
     case UCG_PLAN_TREE_FANOUT:
         /* Create a phase for inter-node communication ("up the tree") */

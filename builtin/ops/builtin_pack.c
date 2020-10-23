@@ -4,6 +4,7 @@
  */
 
 #include "builtin_ops.h"
+#include "builtin_comp_step.inl"
 
 #include <ucs/arch/atomic.h>
 
@@ -12,9 +13,19 @@
 #endif
 
 int ucg_builtin_atomic_reduce_full(ucg_builtin_request_t *req,
-        void *src, void *dst, size_t length);
+                                   void *src, void *dst, size_t length)
+{
+    ucg_builtin_mpi_reduce_single(dst, src, &req->op->super.params);
+    return length;
+}
+
 int ucg_builtin_atomic_reduce_part(ucg_builtin_request_t *req,
-        void *src, void *dst, size_t length);
+                                   void *src, void *dst, size_t length)
+{
+    ucg_builtin_mpi_reduce_fragment(dst, src, length, req->step->dtype_length,
+                                    &req->op->super.params);
+    return length;
+}
 
 #define UCG_BUILTIN_PACK_CB(_offset, _length) { \
     ucg_builtin_header_t *header = (ucg_builtin_header_t*)dest; \
@@ -139,16 +150,15 @@ UCG_BUILTIN_ATOMIC_MULTIPLE_PACK_CB(64)
 #define UCG_BUILTIN_DATATYPE_PACK_CB(_offset, _length) { \
     ucg_builtin_header_t *header = (ucg_builtin_header_t*)dest; \
     ucg_builtin_request_t *req   = (ucg_builtin_request_t*)arg; \
+    ucg_builtin_op_t *op         = req->op; \
+    ucp_dt_generic_t *dt_gen     = ucp_dt_to_generic(op->send_dt); \
+    void *dt_state               = op->rstate.dt.generic.state; \
     ucg_builtin_op_step_t *step  = req->step; \
     size_t buffer_length         = (_length); \
     header->header               = step->am_header.header; \
     ucs_assert(((uintptr_t)arg & UCT_PACK_CALLBACK_REDUCE) == 0); \
-    /* Note: worker is NULL since it isn't required for host-based memory */ \
-    return sizeof(*header) + ucp_dt_pack(NULL, step->bcopy.datatype, \
-                                         UCS_MEMORY_TYPE_HOST, header + 1, \
-                                         step->send_buffer + (_offset), \
-                                         &step->bcopy.pack_state, \
-                                         buffer_length); \
+    dt_gen->ops.pack(dt_state, (_offset), header + 1, buffer_length); \
+    return sizeof(*header) + buffer_length; \
 }
 
 UCG_BUILTIN_PACKER_DECLARE(_datatype_, single)

@@ -51,7 +51,7 @@ ucs_status_t ucg_builtin_bruck_create(ucg_builtin_group_ctx_t *ctx,
     {
         ucg_group_member_index_t peer_index = (my_index + step_size) % proc_count;
         ucs_status_t status = ucg_builtin_single_connection_phase(ctx,
-                peer_index, step_idx, phase_method, 0, phase, is_mock);
+                peer_index, step_idx + 1, phase_method, 0, phase, is_mock);
         if (status != UCS_OK)  {
             return status;
         }

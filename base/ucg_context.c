@@ -240,14 +240,14 @@ static void ucg_context_copy_used_ucg_params(ucg_params_t *dst,
             break;
 
         case UCG_PARAM_FIELD_NEIGHBORS_CB:
-            ucg_params_size = ucs_offsetof(ucg_params_t, reduce_cb_f);
+            ucg_params_size = ucs_offsetof(ucg_params_t, datatype);
             break;
 
-        case UCG_PARAM_FIELD_REDUCE_CB:
-            ucg_params_size = ucs_offsetof(ucg_params_t, type_info);
+        case UCG_PARAM_FIELD_DATATYPE_CB:
+            ucg_params_size = ucs_offsetof(ucg_params_t, reduce_op);
             break;
 
-        case UCG_PARAM_FIELD_TYPE_INFO_CB:
+        case UCG_PARAM_FIELD_REDUCE_OP_CB:
             ucg_params_size = ucs_offsetof(ucg_params_t, mpi_in_place);
             break;
 
