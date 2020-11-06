@@ -270,7 +270,11 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_collective_create,
             UCS_STATIC_ASSERT(sizeof(ucg_collective_params_t) ==
                               UCS_SYS_CACHE_LINE_SIZE);
 
+#ifdef HAVE_UCP_EXTENSIONS
             if (ucs_cpu_cache_line_is_equal(params, &op->params)) {
+#else
+            if (memcmp(params, &op->params, UCS_SYS_CACHE_LINE_SIZE) == 0) {
+#endif
                 ucs_list_del(&op->list);
                 UCG_GROUP_THREAD_CS_EXIT(plan);
                 status = UCS_OK;
