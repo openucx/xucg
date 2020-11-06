@@ -29,7 +29,12 @@ ucs_config_field_t ucg_config_table[] = {
   {NULL}
 };
 
-UCS_CONFIG_REGISTER_TABLE(ucg_config_table, "UCG context", NULL, ucg_config_t)
+UCS_CONFIG_REGISTER_TABLE(ucg_config_table, "UCG context", NULL, ucg_config_t
+#ifndef HAVE_UCT_CONFIG_TABLE_LIST_ARG
+                          )
+#else
+                          , &ucs_config_global_list)
+#endif
 
 #ifndef HAVE_UCP_EXTENSIONS
 typedef struct ucp_workaround {

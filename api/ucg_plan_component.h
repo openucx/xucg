@@ -186,6 +186,12 @@ struct ucg_plan_component {
                                        ucg_group_member_index_t index);
 };
 
+#ifndef HAVE_UCT_CONFIG_TABLE_LIST_ARG
+#define UCG_PLAN_REGISTER_ENTRY(_cfg) UCS_CONFIG_REGISTER_TABLE_ENTRY(_cfg)
+#else
+#define UCG_PLAN_REGISTER_ENTRY(_cfg) UCS_CONFIG_REGISTER_TABLE_ENTRY(_cfg, \
+                                          &ucs_config_global_list)
+#endif
 
 /**
  * Define a planning component.
@@ -195,6 +201,8 @@ struct ucg_plan_component {
  * @param _global_size Size of the global context allocated for this planner.
  * @param _group_size  Size of the per-group context allocated for this planner.
  * @param _query       Function to query planning resources.
+ * @param _init        Function to initialize the component.
+ * @param _finalize    Function to finalize the component (release resources).
  * @param _create      Function to create the component context.
  * @param _destroy     Function to destroy the component context.
  * @param _progress    Function to progress operations by this component.
@@ -203,6 +211,7 @@ struct ucg_plan_component {
  * @param _trigger     Function to start a prepared collective operation.
  * @param _discard     Function to release an operation and related objects.
  * @param _print       Function to output information useful for developers.
+ * @param _fault       Function to handle faults detected during the run.
  * @param _cfg_prefix  Prefix for configuration environment variables.
  * @param _cfg_table   Defines the planning component's configuration values.
  * @param _cfg_struct  Planning component configuration structure.
@@ -236,7 +245,7 @@ struct ucg_plan_component {
     UCS_STATIC_INIT { \
         ucs_list_add_tail(&ucg_plan_components_list, &(_planc).list); \
     } \
-    UCS_CONFIG_REGISTER_TABLE_ENTRY(&(_planc).config)
+    UCG_PLAN_REGISTER_ENTRY(&(_planc).config)
 
 /* Helper function to generate a simple planner description */
 ucs_status_t ucg_plan_single(ucg_plan_component_t *component,
