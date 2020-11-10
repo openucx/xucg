@@ -48,7 +48,8 @@ typedef struct ucg_context {
                         ucg_group_member_index_t index,
                         ucp_address_t **addr,
                         size_t *addr_len);
-        void (*release_f)(ucp_address_t *addr);
+        void (*release_f)(void *cb_group_context,
+                          ucp_address_t *addr);
     } address;
 
     ucg_context_config_t  config;

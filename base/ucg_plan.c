@@ -360,7 +360,7 @@ ucs_status_t ucg_plan_connect(ucg_group_h group,
                 .address = remote_addr
         };
         status = ucp_ep_create(group->worker, &ep_params, &ucp_ep);
-        ucg_global_params.address.release_f(remote_addr);
+        ucg_global_params.address.release_f(group->params.cb_context, remote_addr);
         if (status != UCS_OK) {
             return status;
         }
