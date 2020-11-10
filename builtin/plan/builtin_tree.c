@@ -61,7 +61,7 @@ flagless_retry:
         }
 #endif
 
-        if ((status != UCS_ERR_UNREACHABLE) || (peer_cnt == 1)) {
+        if ((status != UCS_ERR_UNREACHABLE) || (coll_flags == 0)) {
             return status;
         } else if (coll_flags) {
             /* retry - without the flags */
