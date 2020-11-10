@@ -226,11 +226,12 @@ ucg_builtin_step_recv_handle_chunk(enum ucg_builtin_op_step_comp_aggregation ag,
 }
 
 #define case_recv_full(aggregation, _is_batched, _is_fragmented,               \
-                       _is_len_packed, _is_dt_packed)                          \
+                       _is_len_packed, _is_dt_packed, _is_buf_long)            \
    case ((_is_batched    ? UCG_BUILTIN_OP_STEP_COMP_FLAG_BATCHED_DATA    : 0) |\
          (_is_fragmented ? UCG_BUILTIN_OP_STEP_COMP_FLAG_FRAGMENTED_DATA : 0) |\
          (_is_len_packed ? UCG_BUILTIN_OP_STEP_COMP_FLAG_PACKED_LENGTH   : 0) |\
-         (_is_dt_packed  ? UCG_BUILTIN_OP_STEP_COMP_FLAG_PACKED_DATATYPE : 0)):\
+         (_is_dt_packed  ? UCG_BUILTIN_OP_STEP_COMP_FLAG_PACKED_DATATYPE : 0) |\
+         (_is_buf_long   ? UCG_BUILTIN_OP_STEP_COMP_FLAG_LONG_BUFFERS    : 0)):\
                                                                                \
         if (_is_batched) {                                                     \
             uint8_t index;                                                     \
@@ -250,6 +251,9 @@ ucg_builtin_step_recv_handle_chunk(enum ucg_builtin_op_step_comp_aggregation ag,
                    chunk_size = step->buffer_length;                           \
                }                                                               \
             }                                                                  \
+            if (_is_batched) {                                                 \
+                offset *= chunk_size;                                          \
+            }                                                                  \
             length += sizeof(ucg_builtin_header_t);                            \
             for (index = 0; index < step->batch_cnt; index++, data += length) {\
                 status = ucg_builtin_step_recv_handle_chunk(aggregation,       \
@@ -262,6 +266,9 @@ ucg_builtin_step_recv_handle_chunk(enum ucg_builtin_op_step_comp_aggregation ag,
                 }                                                              \
             }                                                                  \
         } else {                                                               \
+            if (_is_batched) {                                                 \
+                offset *= step->buffer_length;                                 \
+            }                                                                  \
             status = ucg_builtin_step_recv_handle_chunk(aggregation,           \
                                                         dest_buffer, data,     \
                                                         length, offset,        \
@@ -274,23 +281,27 @@ ucg_builtin_step_recv_handle_chunk(enum ucg_builtin_op_step_comp_aggregation ag,
                                                                                \
         break;
 
-#define case_recv_fragmented(a,    _is_fragmented, _is_len_packed, _is_dt_packed) \
-              case_recv_full(a, 0, _is_fragmented, _is_len_packed, _is_dt_packed) \
-              case_recv_full(a, 1, _is_fragmented, _is_len_packed, _is_dt_packed)
+#define case_recv_fragmented(a,    _is_fragmented, _is_len_packed, _is_dt_packed, _is_buf_long) \
+              case_recv_full(a, 0, _is_fragmented, _is_len_packed, _is_dt_packed, _is_buf_long) \
+              case_recv_full(a, 1, _is_fragmented, _is_len_packed, _is_dt_packed, _is_buf_long)
 
-#define case_recv_len_packed(a,    _is_len_packed, _is_dt_packed) \
-        case_recv_fragmented(a, 0, _is_len_packed, _is_dt_packed) \
-        case_recv_fragmented(a, 1, _is_len_packed, _is_dt_packed)
+#define case_recv_len_packed(a,    _is_len_packed, _is_dt_packed, _is_buf_long) \
+        case_recv_fragmented(a, 0, _is_len_packed, _is_dt_packed, _is_buf_long) \
+        case_recv_fragmented(a, 1, _is_len_packed, _is_dt_packed, _is_buf_long)
 
-#define  case_recv_dt_packed(a,    _is_dt_packed) \
-        case_recv_len_packed(a, 0, _is_dt_packed) \
-        case_recv_len_packed(a, 1, _is_dt_packed)
+#define  case_recv_dt_packed(a,    _is_dt_packed, _is_buf_long) \
+        case_recv_len_packed(a, 0, _is_dt_packed, _is_buf_long) \
+        case_recv_len_packed(a, 1, _is_dt_packed, _is_buf_long)
+
+#define   case_recv_buf_long(a,    _is_buf_long) \
+         case_recv_dt_packed(a, 0, _is_buf_long) \
+         case_recv_dt_packed(a, 1, _is_buf_long)
 
 #define case_recv(a) \
         case a: \
             switch ((uint8_t)step->comp_flags) { \
-                case_recv_dt_packed(a, 1) \
-                case_recv_dt_packed(a, 0) \
+                case_recv_buf_long(a, 1) \
+                case_recv_buf_long(a, 0) \
             } \
         break;
 

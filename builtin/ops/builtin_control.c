@@ -728,6 +728,10 @@ zcopy_redo:
                                                            "ucg_builtin_step_pipelining");
     }
 
+    if ((step->buffer_length * plan->super.group_size) > (ucg_offset_t)-1) {
+        step->comp_flags |= UCG_BUILTIN_OP_STEP_COMP_FLAG_LONG_BUFFERS;
+    }
+
     /* Do any special assignment w.r.t. the src/dst buffers in this step */
     int is_send            = 0;
     int is_no_recv         = 0;

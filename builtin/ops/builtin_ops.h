@@ -92,8 +92,7 @@ enum ucg_builtin_op_step_flags {
     UCG_BUILTIN_OP_STEP_FLAG_BCOPY_PACK_LOCK   = UCS_BIT(15),
     UCG_BUILTIN_OP_STEP_FLAG_TEMP_BUFFER_USED  = UCS_BIT(16),
     UCG_BUILTIN_OP_STEP_FLAG_PACKED_DTYPE_MODE = UCS_BIT(17),
-    UCG_BUILTIN_OP_STEP_FLAG_FT_ONGOING        = UCS_BIT(18),
-    UCG_BUILTIN_OP_STEP_FLAG_RESERVED          = UCS_BIT(19)
+    UCG_BUILTIN_OP_STEP_FLAG_FT_ONGOING        = UCS_BIT(18)
 };
 
 enum ucg_builtin_op_step_comp_aggregation {
@@ -112,7 +111,8 @@ enum ucg_builtin_op_step_comp_flags {
     UCG_BUILTIN_OP_STEP_COMP_FLAG_BATCHED_DATA    = UCS_BIT(0),
     UCG_BUILTIN_OP_STEP_COMP_FLAG_FRAGMENTED_DATA = UCS_BIT(1),
     UCG_BUILTIN_OP_STEP_COMP_FLAG_PACKED_LENGTH   = UCS_BIT(2),
-    UCG_BUILTIN_OP_STEP_COMP_FLAG_PACKED_DATATYPE = UCS_BIT(3)
+    UCG_BUILTIN_OP_STEP_COMP_FLAG_PACKED_DATATYPE = UCS_BIT(3),
+    UCG_BUILTIN_OP_STEP_COMP_FLAG_LONG_BUFFERS    = UCS_BIT(4)
 }; /* Note: only 4 bits are allocated for this field in ucg_builtin_op_step_t */
 
 enum ucg_builtin_op_step_comp_criteria {
@@ -143,8 +143,8 @@ typedef struct ucg_builtin_zcomp {
 } ucg_builtin_zcomp_t;
 
 typedef struct ucg_builtin_op_step {
-    enum ucg_builtin_op_step_flags            flags            :20;
-    enum ucg_builtin_op_step_comp_flags       comp_flags       :4;
+    enum ucg_builtin_op_step_flags            flags            :19;
+    enum ucg_builtin_op_step_comp_flags       comp_flags       :5;
     enum ucg_builtin_op_step_comp_aggregation comp_aggregation :3;
     enum ucg_builtin_op_step_comp_criteria    comp_criteria    :3;
     enum ucg_builtin_op_step_comp_action      comp_action      :2;
