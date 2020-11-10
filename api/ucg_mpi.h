@@ -83,20 +83,20 @@ ucg_coll_barrier_init(int ign, ucg_group_h group, ucg_coll_h *coll_p)
     .dtype  = _dtype
 
 #define UCG_COLL_PARAMS_BUF_O(_buffer, _count, _dtype) \
-    UCG_COLL_PARAMS_BUF_R(_buffer, _count, _dtype), \
-    .op     = op
+    .op     = op, \
+    UCG_COLL_PARAMS_BUF_R(_buffer, _count, _dtype)
 
 #define UCG_COLL_PARAMS_BUF_V(_buffer, _counts, _dtype, _displs) \
+    .displs = _displs, \
     .buffer = _buffer, \
     .counts = _counts, \
-    .dtype  = _dtype,  \
-    .displs = _displs
+    .dtype  = _dtype
 
 #define UCG_COLL_PARAMS_BUF_W(_buffer, _counts, _dtypes, _displs) \
+    .displs = _displs, \
     .buffer = _buffer, \
     .counts = _counts, \
-    .dtypes = _dtypes, \
-    .displs = _displs
+    .dtypes = _dtypes
 
 #define UCG_COLL_INIT(_lname, _uname, _stype, _sargs, _rtype, _rargs,...)\
 static UCS_F_ALWAYS_INLINE ucs_status_t ucg_coll_##_lname##_init(__VA_ARGS__,  \
