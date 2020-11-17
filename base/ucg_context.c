@@ -253,6 +253,10 @@ static void ucg_context_copy_used_ucg_params(ucg_params_t *dst,
             break;
 
         case UCG_PARAM_FIELD_REDUCE_OP_CB:
+            ucg_params_size = ucs_offsetof(ucg_params_t, completion);
+            break;
+
+        case UCG_PARAM_FIELD_COMPLETION_CB:
             ucg_params_size = ucs_offsetof(ucg_params_t, mpi_in_place);
             break;
 
@@ -270,6 +274,23 @@ static void ucg_context_copy_used_ucg_params(ucg_params_t *dst,
 }
 
 ucg_params_t ucg_global_params; /* Ugly - but efficient */
+
+static void ucg_context_comp_fallback(void *req, ucs_status_t status)
+{
+    uint32_t *flags = UCS_PTR_BYTE_OFFSET(req,
+            ucg_global_params.completion.comp_flag_offset);
+
+    ucs_status_t *result = UCS_PTR_BYTE_OFFSET(req,
+            ucg_global_params.completion.comp_status_offset);
+
+    *result = status;
+    *flags |= 1;
+}
+
+static void ucg_context_comp_fallback_no_offsets(void *req, ucs_status_t status)
+{
+    *(uint8_t*)req = (uint8_t)-1;
+}
 
 ucs_status_t ucg_init_version(unsigned ucg_api_major_version,
                               unsigned ucg_api_minor_version,
@@ -308,6 +329,12 @@ ucs_status_t ucg_init_version(unsigned ucg_api_major_version,
 
     /* Store the UCG params in a global location, for easy access */
     ucg_context_copy_used_ucg_params(&ucg_global_params, params);
+
+    int params_have_comp = (params->field_mask & UCG_PARAM_FIELD_COMPLETION_CB);
+    if ((!params_have_comp) || (!params->completion.coll_comp_cb_f)) {
+        ucg_global_params.completion.coll_comp_cb_f = params_have_comp ?
+                ucg_context_comp_fallback : ucg_context_comp_fallback_no_offsets;
+    }
 
 #ifndef HAVE_UCP_EXTENSIONS
     const ucp_params_t *ucp_params_arg = params->super;

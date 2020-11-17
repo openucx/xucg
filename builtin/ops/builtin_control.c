@@ -1290,7 +1290,7 @@ void ucg_builtin_op_discard(ucg_op_t *op)
 
 ucs_status_t ucg_builtin_op_trigger(ucg_op_t *op,
                                     ucg_coll_id_t coll_id,
-                                    ucg_request_t *request)
+                                    void *request)
 {
     /* Allocate a "slot" for this operation, from a per-group array of slots */
     ucg_builtin_op_t *builtin_op  = (ucg_builtin_op_t*)op;

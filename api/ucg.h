@@ -63,13 +63,14 @@ BEGIN_C_DECLS
  * present. It is used to enable backward compatibility support.
  */
 enum ucg_params_field {
-    UCG_PARAM_FIELD_JOB_UID      = UCS_BIT(0), /**< Unique ID for this job */
-    UCG_PARAM_FIELD_ADDRESS_CB   = UCS_BIT(1), /**< Peer address lookup */
-    UCG_PARAM_FIELD_NEIGHBORS_CB = UCS_BIT(2), /**< Neighborhood info */
-    UCG_PARAM_FIELD_DATATYPE_CB  = UCS_BIT(3), /**< Callback for datatypes */
-    UCG_PARAM_FIELD_REDUCE_OP_CB = UCS_BIT(4), /**< Callback for reduce ops */
-    UCG_PARAM_FIELD_MPI_IN_PLACE = UCS_BIT(5), /**< MPI_IN_PLACE value */
-    UCG_PARAM_FIELD_HANDLE_FAULT = UCS_BIT(6)  /**< Fault-tolerance support */
+    UCG_PARAM_FIELD_JOB_UID       = UCS_BIT(0), /**< Unique ID for this job */
+    UCG_PARAM_FIELD_ADDRESS_CB    = UCS_BIT(1), /**< Peer address lookup */
+    UCG_PARAM_FIELD_NEIGHBORS_CB  = UCS_BIT(2), /**< Neighborhood info */
+    UCG_PARAM_FIELD_DATATYPE_CB   = UCS_BIT(3), /**< Callback for datatypes */
+    UCG_PARAM_FIELD_REDUCE_OP_CB  = UCS_BIT(4), /**< Callback for reduce ops */
+    UCG_PARAM_FIELD_COMPLETION_CB = UCS_BIT(5), /**< Actions upon completion */
+    UCG_PARAM_FIELD_MPI_IN_PLACE  = UCS_BIT(6), /**< MPI_IN_PLACE value */
+    UCG_PARAM_FIELD_HANDLE_FAULT  = UCS_BIT(7)  /**< Fault-tolerance support */
 };
 
 enum ucg_fault_tolerance_mode {
@@ -157,6 +158,18 @@ typedef struct ucg_params {
         /* Check if the reduction operation is commutative (e.g. MPI_MINLOC) */
         int (*is_commutative_f)(void *reduce_op);
     } reduce_op;
+
+    /* Requested action upon completion (for non-blocking calls) */
+    struct {
+        /* Callback function to invoke upon completion of a collective call */
+        void (*coll_comp_cb_f)(void *req, ucs_status_t status);
+
+        /* offset where to set completion (ignored unless coll_comp_cb is NULL) */
+        size_t comp_flag_offset;
+
+        /* offset where to write status (ignored unless coll_comp_cb is NULL) */
+        size_t comp_status_offset;
+    } completion;
 
     /* The value of MPI_IN_PLACE, which can replace send or receive buffers */
     void* mpi_in_place;
@@ -353,31 +366,6 @@ typedef struct ucg_collective {
 #define UCG_PARAM_OP(_params)     (_params)->recv.op
 #define UCG_PARAM_DISPLS(_params) (_params)->recv.displs
 
-/**
- * @ingroup UCG_GROUP
- * @brief Public UCG request flags.
- */
-enum ucg_request_common_flags {
-    UCG_REQUEST_COMMON_FLAG_COMPLETED = UCS_BIT(0),
-
-    UCG_REQUEST_COMMON_FLAG_MASK = UCS_MASK(1)
-};
-
-
-/**
- * @ingroup UCG_GROUP
- * @brief Creation parameters for the UCG collective operation.
- *
- * The structure defines the parameters that are used during the UCG collective
- * @ref ucg_collective_create "creation". The size of this structure is critical
- * to performance, as well as it being contiguous, because its entire contents
- * are accessed during run-time.
- */
-typedef struct ucg_request {
-    volatile uint32_t flags;  /**< @ref ucg_request_common_flags */
-    ucs_status_t      status; /**< Operation status */
-} ucg_request_t;
-
 
 /**
  * @ingroup UCG_GROUP
@@ -457,42 +445,21 @@ ucs_status_t ucg_collective_create(ucg_group_h group,
  * @brief Starts a collective operation.
  *
  * @param [in]  coll        Collective operation handle.
- * @param [in]  req         Request handle allocated by the user.
+ * @param [in]  req         Request handle, allocated by the user.
  *
  * @return UCS_OK           - The collective operation was completed immediately.
  * @return UCS_INPROGRESS   - The collective was not completed and is in progress.
- *                            @ref ucg_request_check_status() should be used to
- *                            monitor @a req status.
- * @return Error code as defined by @ref ucs_status_t
- */
-ucs_status_t ucg_collective_start(ucg_coll_h coll, ucg_request_t *req);
-
-
-/**
- * @ingroup UCG_COLLECTIVE
- * @brief Check the status of non-blocking request.
- *
- * This routine checks the state of the request and returns its current status.
- * Any value different from UCS_INPROGRESS means that request is in a completed
- * state.
- *
- * @param [in]  req     Non-blocking request to check.
  *
  * @return Error code as defined by @ref ucs_status_t
  */
-static inline ucs_status_t ucg_request_check_status(ucg_request_t *req)
-{
-    return (req->flags & UCG_REQUEST_COMMON_FLAG_COMPLETED) ?
-            req->status : UCS_INPROGRESS;
-}
+ucs_status_t ucg_collective_start(ucg_coll_h coll, void *req);
 
 
 /**
  * @ingroup UCG_COLLECTIVE
  * @brief Cancel an outstanding collective request.
  *
- * @param [in]  group        Group which the request belongs to.
- * @param [in]  req          Non-blocking request to cancel.
+ * @param [in]  coll        Collective operation handle.
  *
  * This routine tries to cancels an outstanding collective request.  After
  * calling this routine, the @a request will be in completed or canceled (but
@@ -502,7 +469,7 @@ static inline ucs_status_t ucg_request_check_status(ucg_request_t *req)
  * called with the @a status argument of the callback set to UCS_OK, and in a
  * case it is canceled the @a status argument is set to UCS_ERR_CANCELED.
  */
-void ucg_request_cancel(ucg_group_h group, ucg_request_t *req);
+void ucg_request_cancel(ucg_coll_h coll);
 
 
 /**

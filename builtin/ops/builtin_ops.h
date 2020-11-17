@@ -234,7 +234,7 @@ struct ucg_builtin_request {
                                               alignment reasons with slot structs */
     ucg_builtin_op_step_t    *step;      /**< indicator of current step within the op */
     ucg_builtin_op_t         *op;        /**< operation currently running */
-    ucg_request_t            *comp_req;  /**< completion status is written here */
+    void                     *comp_req;  /**< completion status is written here */
 };
 
 /*
@@ -295,7 +295,7 @@ void         ucg_builtin_op_discard(ucg_op_t *op);
 
 ucs_status_t ucg_builtin_op_trigger(ucg_op_t *op,
                                     ucg_coll_id_t coll_id,
-                                    ucg_request_t *request);
+                                    void *request);
 
 
 /* Callback functions exported for debugging */

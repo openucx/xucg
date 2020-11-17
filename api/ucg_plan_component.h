@@ -114,7 +114,7 @@ typedef struct ucg_plan {
 typedef struct ucg_op ucg_op_t;
 typedef ucs_status_t (*ucg_op_trigger_f)(ucg_op_t *op,
                                          ucg_coll_id_t coll_id,
-                                         ucg_request_t *request);
+                                         void *request);
 
 typedef void         (*ucg_op_discard_f)(ucg_op_t *op);
 struct ucg_op {
@@ -126,7 +126,7 @@ struct ucg_op {
         ucs_list_link_t      list;        /**< cache list member */
         struct {
             ucs_queue_elem_t queue;       /**< pending queue member */
-            ucg_request_t   *pending_req; /**< original invocation request */
+            void            *pending_req; /**< original invocation request */
         };
     };
 

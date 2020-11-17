@@ -243,7 +243,7 @@ void ucg_group_destroy(ucg_group_h group)
     ucs_free(group);
 }
 
-void ucg_request_cancel(ucg_group_h group, ucg_request_t *req)
+void ucg_request_cancel(ucg_coll_h coll)
 {
     // TODO: implement
 }
@@ -336,7 +336,7 @@ out:
 }
 
 ucs_status_t static UCS_F_ALWAYS_INLINE
-ucg_collective_trigger(ucg_group_h group, ucg_op_t *op, ucg_request_t *req)
+ucg_collective_trigger(ucg_group_h group, ucg_op_t *op, void *req)
 {
     ucs_status_t ret;
 
@@ -386,7 +386,7 @@ ucs_status_t ucg_collective_release_barrier(ucg_group_h group)
 }
 
 UCS_PROFILE_FUNC(ucs_status_t, ucg_collective_start, (coll, req),
-                 ucg_coll_h coll, ucg_request_t *req)
+                 ucg_coll_h coll, void *req)
 {
     ucs_status_t ret;
     ucg_op_t *op = (ucg_op_t*)coll;

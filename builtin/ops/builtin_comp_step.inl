@@ -8,11 +8,7 @@
 void static UCS_F_ALWAYS_INLINE
 ucg_builtin_comp_last_step_cb(ucg_builtin_request_t *req, ucs_status_t status)
 {
-    ucg_builtin_op_t *op    = req->op;
-    ucg_request_t *user_req = req->comp_req;
-
-    /* Mark (per-group) slot as available */
-    req->expecting.local_id = 0;
+    ucg_builtin_op_t *op = req->op;
 
     /* Finalize the collective operation (including user-defined callback) */
     if (ucs_unlikely(op->fini_cb != NULL)) {
@@ -30,13 +26,15 @@ ucg_builtin_comp_last_step_cb(ucg_builtin_request_t *req, ucs_status_t status)
         status = op->optm_cb(op);
     }
 
-    user_req->status = status;
-    user_req->flags  = UCP_REQUEST_FLAG_COMPLETED;
+    /* Mark (per-group) slot as available */
+    req->expecting.local_id = 0;
+
+    ucg_global_params.completion.coll_comp_cb_f(req->comp_req, status);
     ucs_assert(status != UCS_INPROGRESS);
 
-    UCS_PROFILE_REQUEST_EVENT(user_req, "complete_coll", 0);
+    UCS_PROFILE_REQUEST_EVENT(req->comp_req, "complete_coll", 0);
     ucs_trace_req("collective returning completed request=%p (status: %s)",
-                  user_req, ucs_status_string(status));
+                  req->comp_req, ucs_status_string(status));
 }
 
 ucs_status_t static UCS_F_ALWAYS_INLINE
@@ -429,10 +427,10 @@ ucg_builtin_step_check_pending(ucg_builtin_comp_slot_t *slot)
 #endif
                     );
 
-            /* If the step has indeed completed - check the entire op */
+            /* If the step has indeed completed - check the entire operation */
             if (is_step_done) {
-                return (slot->req.comp_req->flags == UCP_REQUEST_FLAG_COMPLETED)?
-                        slot->req.comp_req->status : UCS_INPROGRESS;
+                int is_last_step = (slot->req.expecting.local_id == 0);
+                return is_last_step ? UCS_OK : UCS_INPROGRESS;
             }
         }
     }
