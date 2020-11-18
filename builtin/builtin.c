@@ -360,9 +360,9 @@ static void ucg_builtin_destroy(ucg_group_ctx_h ctx)
     /* Note: gctx is freed as part of the group object itself */
 }
 
+/*
 static unsigned ucg_builtin_progress(ucg_group_ctx_h ctx)
 {
-    /* Reset the list of active slots, then re-test (some may return to it) */
     ucg_builtin_group_ctx_t *gctx = ctx;
     uint64_t resend_slots         = ucs_atomic_swap64(&gctx->resend_slots, 0);
     if (ucs_likely(resend_slots == 0)) {
@@ -384,7 +384,6 @@ static unsigned ucg_builtin_progress(ucg_group_ctx_h ctx)
 #if ENABLE_FAULT_TOLERANCE
         else if ((status == UCS_INPROGRESS) &&
                 !(req->step->flags & UCG_BUILTIN_OP_STEP_FLAG_FT_ONGOING)) {
-            /* Step in progress - start F/T for missing inbound messages */
             ucg_builtin_plan_phase_t *phase = req->step->phase;
             if (phase->ep_cnt == 1) {
                 ucg_ft_start(group, phase->indexes[0], phase->single_ep, &phase->handles[0]);
@@ -397,13 +396,13 @@ static unsigned ucg_builtin_progress(ucg_group_ctx_h ctx)
                 }
             }
 
-            /* Mark fault-tolerance in progress */
             req->step->flags |= UCG_BUILTIN_OP_STEP_FLAG_FT_ONGOING;
         }
 #endif
 
     return ret;
 }
+*/
 
 ucs_mpool_ops_t ucg_builtin_plan_mpool_ops = {
     .chunk_alloc   = ucs_mpool_hugetlb_malloc,
@@ -892,8 +891,8 @@ UCG_PLAN_COMPONENT_DEFINE(ucg_builtin_component, "builtin",
                           sizeof(ucg_builtin_group_ctx_t),
                           ucg_builtin_query, ucg_builtin_init,
                           ucg_builtin_finalize, ucg_builtin_create,
-                          ucg_builtin_destroy, ucg_builtin_progress,
-                          ucg_builtin_plan, ucg_builtin_op_create,
-                          ucg_builtin_op_trigger, ucg_builtin_op_discard,
-                          ucg_builtin_print, ucg_builtin_handle_fault, "BUILTIN_",
+                          ucg_builtin_destroy, ucg_builtin_plan,
+                          ucg_builtin_op_create, ucg_builtin_op_trigger,
+                          ucg_builtin_op_discard, ucg_builtin_print,
+                          ucg_builtin_handle_fault, "BUILTIN_",
                           ucg_builtin_config_table, ucg_builtin_config_t);

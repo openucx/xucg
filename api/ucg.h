@@ -413,15 +413,6 @@ void ucg_group_destroy(ucg_group_h group);
 
 
 /**
- * @ingroup UCG_GROUP
- * @brief Progresses a Group object.
- *
- * @param [in]  group       Group object to progress.
- */
-unsigned ucg_group_progress(ucg_group_h group);
-
-
-/**
  * @ingroup UCG_COLLECTIVE
  * @brief Creates a collective operation on a group object.
  * The parameters are intentionally non-constant, to allow UCG to write-back some

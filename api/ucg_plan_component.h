@@ -160,8 +160,6 @@ struct ucg_plan_component {
                                        const ucg_group_params_t *group_params);
     /* destroy a group context, along with all its operations and requests */
     void                   (*destroy) (ucg_group_ctx_h gctx);
-    /* check a group context for progress */
-    unsigned               (*progress)(ucg_group_ctx_h gctx);
 
     /* plan a collective operation with this component */
     ucs_status_t           (*plan)    (ucg_group_ctx_h gctx,
@@ -218,9 +216,8 @@ struct ucg_plan_component {
  */
 #define UCG_PLAN_COMPONENT_DEFINE(_planc, _name, _global_size, _group_size, \
                                   _query, _init, _finalize, _create, _destroy, \
-                                  _progress, _plan, _prepare, _trigger, \
-                                  _discard, _print, _fault, _cfg_prefix, \
-                                  _cfg_table, _cfg_struct) \
+                                  _plan, _prepare, _trigger, _discard, _print, \
+                                  _fault, _cfg_prefix, _cfg_table, _cfg_struct) \
     ucg_plan_component_t _planc = { \
         .name               = _name, \
         .config.name        = _name" planner",\
@@ -234,7 +231,6 @@ struct ucg_plan_component {
         .finalize           = _finalize, \
         .create             = _create, \
         .destroy            = _destroy, \
-        .progress           = _progress, \
         .plan               = _plan, \
         .prepare            = _prepare, \
         .trigger            = _trigger, \

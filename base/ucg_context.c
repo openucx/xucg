@@ -113,7 +113,6 @@ static ucs_status_t ucg_context_init(void *groups_ctx)
 {
     ucg_context_t *ctx          = (ucg_context_t*)groups_ctx;
     ctx->next_group_id          = 0;
-    ctx->iface_cnt              = 0;
 
     /* Query all the available planners, to find the total space they require */
     size_t planners_total_size;

@@ -28,10 +28,6 @@ typedef struct ucg_config {
  * context - and allocated a context slot in each UCP Worker at a certain offset.
  */
 typedef struct ucg_context {
-    /* List of low-level (UCT) interfaces used during progress */
-    uct_iface_h           ifaces[UCG_MAX_IFACES];
-    unsigned              iface_cnt;
-
 #if ENABLE_FAULT_TOLERANCE
     ucg_ft_ctx_t          ft_ctx; /* If supported - fault-tolerance context */
 #endif

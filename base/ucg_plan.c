@@ -28,22 +28,6 @@ __KHASH_IMPL(ucg_group_ep, static UCS_F_MAYBE_UNUSED inline,
              ucg_group_member_index_t, ucp_ep_h, 1, kh_int64_hash_func,
              kh_int64_hash_equal);
 
-#define UCG_GROUP_PROGRESS_ADD(iface, ctx) { \
-    unsigned _idx = 0; \
-    if (ucs_unlikely(_idx == UCG_MAX_IFACES)) { \
-        return UCS_ERR_EXCEEDS_LIMIT; \
-    } \
-    while (_idx < (ctx)->iface_cnt) { \
-        if ((ctx)->ifaces[_idx] == (iface)) { \
-            break; \
-        } \
-        _idx++; \
-    } \
-    if (_idx == (ctx)->iface_cnt) { \
-        (ctx)->ifaces[(ctx)->iface_cnt++] = (iface); \
-    } \
-}
-
 #define ucg_plan_foreach(_descs, _desc_cnt, _plan_ctx, _grp_ctx) \
     typeof(_desc_cnt) idx = 0; \
     ucg_plan_component_t* comp; \
@@ -264,17 +248,6 @@ ucs_status_t ucg_plan_group_create(ucg_group_h group)
     return UCS_OK;
 }
 
-unsigned ucg_plan_group_progress(ucg_group_h group)
-{
-    unsigned ret = 0;
-
-    ucg_group_foreach(group) {
-        ret += comp->progress(gctx);
-    }
-
-    return ret;
-}
-
 void ucg_plan_group_destroy(ucg_group_h group)
 {
     ucg_group_foreach(group) {
@@ -418,11 +391,6 @@ am_retry:
         ucp_worker_progress(group->worker);
         goto am_retry;
     }
-
-    /* Register interfaces to be progressed in future calls */
-    ucg_context_t *ctx = group->context;
-    UCG_GROUP_PROGRESS_ADD((*ep_p)->iface, ctx);
-    UCG_GROUP_PROGRESS_ADD((*ep_p)->iface, group);
 
     *md_p      = ucp_ep_md(ucp_ep, lane);
     *md_attr_p = ucp_ep_md_attr(ucp_ep, lane);

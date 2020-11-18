@@ -54,36 +54,6 @@ static ucs_stats_class_t ucg_group_stats_class = {
 #define UCG_GROUP_THREAD_CS_EXIT(_obj)
 #endif
 
-static UCS_F_ALWAYS_INLINE
-ucg_context_h ucg_worker_get_context(ucp_worker_h worker)
-{
-    return ucs_container_of(worker->context, ucg_context_t, ucp_ctx);
-}
-
-unsigned ucg_worker_progress(ucp_worker_h worker)
-{
-    unsigned idx, ret = 0;
-    ucg_context_t *ctx = ucg_worker_get_context(worker);
-
-    /* First, try the interfaces used for collectives */
-    for (idx = 0; idx < ctx->iface_cnt; idx++) {
-        ret += uct_iface_progress(ctx->ifaces[idx]);
-    }
-
-    /* As a fallback (and for correctness) - try all other transports */
-    return ret + ucp_worker_progress(worker);
-}
-
-unsigned ucg_group_progress(ucg_group_h group)
-{
-    unsigned ret = ucg_plan_group_progress(group);
-    if (ret) {
-        return ret;
-    }
-
-    return ucg_worker_progress(group->worker);
-}
-
 static inline ucs_status_t ucg_group_plan(ucg_group_h group,
                                           const ucg_collective_params_t *params,
                                           ucg_plan_t **plan_p)
@@ -136,7 +106,7 @@ ucs_status_t ucg_group_create(ucp_worker_h worker,
                               ucg_group_h *group_p)
 {
     ucs_status_t status;
-    ucg_context_t *ctx = ucg_worker_get_context(worker);
+    ucg_context_t *ctx = ucs_container_of(worker->context, ucg_context_t, ucp_ctx);
 
     if (!ucs_test_all_flags(params->field_mask, UCG_GROUP_PARAM_REQUIRED_MASK)) {
         ucs_error("UCG is missing some critical group parameters");
@@ -156,7 +126,6 @@ ucs_status_t ucg_group_create(ucp_worker_h worker,
     group->context                = ctx;
     group->worker                 = worker;
     group->next_coll_id           = 1;
-    group->iface_cnt              = 0;
 
 #if ENABLE_MT
     ucs_recursive_spinlock_init(&group->lock, 0);
@@ -225,7 +194,7 @@ void ucg_group_destroy(ucg_group_h group)
 {
     /* First - make sure all the collectives are completed */
     while (!ucs_queue_is_empty(&group->pending)) {
-        ucg_group_progress(group);
+        ucp_worker_progress(group->worker);
     }
 
     UCG_GROUP_THREAD_CS_ENTER(group)

@@ -42,9 +42,6 @@ typedef struct ucg_group {
 
     UCS_STATS_NODE_DECLARE(stats);
 
-    unsigned              iface_cnt;    /**< number of interfaces (for progress) */
-    uct_iface_h           ifaces[UCG_MAX_IFACES];
-
     /*
      * per-group cache of previous plans/operations, arranged as follows:
      * for each collective type (e.g. Allreduce) there is a plan with a list of
