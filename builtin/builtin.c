@@ -361,7 +361,7 @@ static void ucg_builtin_destroy(ucg_group_ctx_h ctx)
 }
 
 /*
-static unsigned ucg_builtin_progress(ucg_group_ctx_h ctx)
+static unsigned ucg_builtin_async_progress(ucg_group_ctx_h ctx)
 {
     ucg_builtin_group_ctx_t *gctx = ctx;
     uint64_t resend_slots         = ucs_atomic_swap64(&gctx->resend_slots, 0);

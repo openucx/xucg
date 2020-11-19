@@ -249,10 +249,9 @@ ucs_status_t ucg_plan_single(ucg_plan_component_t *component,
                              unsigned *desc_cnt_p);
 
 enum ucg_plan_connect_flags {
-    UCG_PLAN_CONNECT_FLAG_WANT_INCAST    = UCS_BIT(0), /* want transport with incast */
-    UCG_PLAN_CONNECT_FLAG_WANT_BCAST     = UCS_BIT(1), /* want transport with bcast */
-    UCG_PLAN_CONNECT_FLAG_WANT_INTERNODE = UCS_BIT(2), /* want transport between hosts */
-    UCG_PLAN_CONNECT_FLAG_WANT_INTRANODE = UCS_BIT(3)  /* want transport within a host */
+    UCG_PLAN_CONNECT_FLAG_WANT_INCAST = UCS_BIT(0), /* want transport with incast */
+    UCG_PLAN_CONNECT_FLAG_WANT_BCAST  = UCS_BIT(1), /* want transport with bcast */
+    UCG_PLAN_CONNECT_FLAG_AM_ROOT     = UCS_BIT(2)  /* this is the root */
 };
 
 /* Helper function for connecting to other group members - by their index */

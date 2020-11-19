@@ -37,27 +37,22 @@ static inline ucs_status_t ucg_builtin_tree_connect_phase(ucg_builtin_plan_phase
                                                           enum ucg_builtin_plan_method_type method,
                                                           enum ucg_plan_connect_flags coll_flags)
 {
+    unsigned idx;
+    ucs_status_t status;
+
     int is_mock = params->coll_type->modifiers & UCG_GROUP_COLLECTIVE_MODIFIER_MOCK_EPS;
 
     ucs_assert(peer_cnt > 0);
     if ((peer_cnt == 1) || coll_flags) {
-        ucg_group_member_index_t peer;
 flagless_retry:
-        peer = peers[0];
-#ifdef HAVE_UCT_COLLECTIVES
-        if ((peer_cnt > 1) && (coll_flags & (UCG_PLAN_CONNECT_FLAG_WANT_INCAST |
-                                             UCG_PLAN_CONNECT_FLAG_WANT_BCAST))) {
-            peer = params->group_params->member_index;
-        }
-#endif
-
-        ucs_status_t status = ucg_builtin_single_connection_phase(params->ctx,
-                peer, step_index, method, coll_flags, phase, is_mock);
+        status = ucg_builtin_single_connection_phase(params->ctx,
+                peers[0], step_index, method, coll_flags, phase, is_mock);
 
 #if ENABLE_DEBUG_DATA || ENABLE_FAULT_TOLERANCE
         if (status == UCS_OK) {
             phase->indexes = UCS_ALLOC_CHECK(sizeof(*peers), "tree root index");
-            phase->indexes[0] = peer;
+            phase->indexes[0] = (coll_flags & UCG_PLAN_CONNECT_FLAG_AM_ROOT) ?
+                    params->group_params->member_index : peers[0];
         }
 #endif
 
@@ -82,9 +77,7 @@ flagless_retry:
 #endif
 
     /* connect every endpoint, by group member index */
-    unsigned idx;
-    ucs_status_t status = UCS_OK;
-    for (idx = 0; (idx < peer_cnt) && (status == UCS_OK); idx++, peers++) {
+    for (idx = 0, status = UCS_OK; (idx < peer_cnt) && (status == UCS_OK); idx++, peers++) {
         status = ucg_builtin_connect(params->ctx, *peers, phase, idx, 0, is_mock);
     }
     return status;
@@ -104,7 +97,7 @@ ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
                                       ucg_group_member_index_t *host_down,
                                       unsigned host_down_cnt)
 {
-    unsigned idx;
+    unsigned idx, flags;
     ucs_status_t status               = UCS_OK;
     enum ucg_collective_modifiers mod = params->coll_type->modifiers;
     uct_ep_h *iter_eps                = first_ep;
@@ -133,10 +126,12 @@ ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
                 ucs_assert(host_up_cnt == 0);
                 fanin_method = UCG_PLAN_METHOD_RECV_TERMINAL;
             }
+            flags = UCG_PLAN_CONNECT_FLAG_AM_ROOT |
+                    UCG_PLAN_CONNECT_FLAG_WANT_INCAST;
         } else {
             fanin_method = (ppn == 2) ? UCG_PLAN_METHOD_SEND_TERMINAL :
                                         UCG_PLAN_METHOD_SEND_TO_SM_ROOT;
-            // TODO: what if SM transports are not included/supported?
+            flags = UCG_PLAN_CONNECT_FLAG_WANT_INCAST;
         }
 
         if (host_up_cnt + host_down_cnt) {
@@ -145,8 +140,7 @@ ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
             if (host_up_cnt) host_down[host_down_cnt++] = host_up[0];
             status = ucg_builtin_tree_connect_phase(phase++, params, step_offset,
                     &iter_eps, host_down, host_down_cnt, fanin_method,
-                    (ppn == 2) ? 0 : (UCG_PLAN_CONNECT_FLAG_WANT_INTRANODE |
-                                      UCG_PLAN_CONNECT_FLAG_WANT_INCAST));
+                    (ppn == 2) ? 0 : flags);
             (*phs_cnt)++;
             if (status != UCS_OK) {
                 break;
@@ -165,8 +159,11 @@ ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
                 ucs_assert(host_up_cnt == 0);
                 fanin_method = UCG_PLAN_METHOD_RECV_TERMINAL;
             }
+            flags = UCG_PLAN_CONNECT_FLAG_AM_ROOT |
+                    UCG_PLAN_CONNECT_FLAG_WANT_INCAST;
         } else {
             fanin_method = UCG_PLAN_METHOD_SEND_TERMINAL;
+            flags = UCG_PLAN_CONNECT_FLAG_WANT_INCAST;
         }
 
         if (net_up_cnt + net_down_cnt) {
@@ -174,9 +171,7 @@ ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
              * forwarding the message to the parent is all included in one step */
             if (net_up_cnt) net_down[net_down_cnt++] = net_up[0];
             status = ucg_builtin_tree_connect_phase(phase++, params, step_offset + 1,
-                    &iter_eps, net_down, net_down_cnt, fanin_method,
-                    UCG_PLAN_CONNECT_FLAG_WANT_INTERNODE |
-                    UCG_PLAN_CONNECT_FLAG_WANT_INCAST);
+                    &iter_eps, net_down, net_down_cnt, fanin_method, flags);
             (*phs_cnt)++;
         }
 
@@ -198,8 +193,11 @@ ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
                                    UCG_PLAN_METHOD_SEND_TERMINAL):
                      (net_up_cnt ? UCG_PLAN_METHOD_SCATTER_WAYPOINT:
                                    UCG_PLAN_METHOD_SCATTER_TERMINAL);
+            flags = UCG_PLAN_CONNECT_FLAG_AM_ROOT |
+                    UCG_PLAN_CONNECT_FLAG_WANT_BCAST;
         } else {
             fanout_method = UCG_PLAN_METHOD_RECV_TERMINAL;
+            flags = UCG_PLAN_CONNECT_FLAG_WANT_BCAST;
         }
 
         if (net_up_cnt + net_down_cnt) {
@@ -211,9 +209,7 @@ ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
             }
             status = ucg_builtin_tree_connect_phase(phase++, params, step_offset + 2,
                                                     &iter_eps, net_up, net_up_cnt,
-                                                    fanout_method,
-                                                    UCG_PLAN_CONNECT_FLAG_WANT_INTERNODE |
-                                                    UCG_PLAN_CONNECT_FLAG_WANT_BCAST);
+                                                    fanout_method, flags);
             (*phs_cnt)++;
             if (status != UCS_OK) {
                 break;
@@ -227,8 +223,11 @@ ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
                                    UCG_PLAN_METHOD_SEND_TERMINAL):
                     (host_up_cnt ? UCG_PLAN_METHOD_SCATTER_WAYPOINT:
                                    UCG_PLAN_METHOD_SCATTER_TERMINAL);
+            flags = UCG_PLAN_CONNECT_FLAG_AM_ROOT |
+                    UCG_PLAN_CONNECT_FLAG_WANT_BCAST;
         } else {
             fanout_method = UCG_PLAN_METHOD_RECV_TERMINAL;
+            flags = UCG_PLAN_CONNECT_FLAG_WANT_BCAST;
         }
 
         if (host_up_cnt + host_down_cnt) {
@@ -241,8 +240,7 @@ ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
             status = ucg_builtin_tree_connect_phase(phase++, params, step_offset + 3,
                                                     &iter_eps, host_up, host_up_cnt,
                                                     fanout_method, (ppn == 2) ? 0 :
-                                                    (UCG_PLAN_CONNECT_FLAG_WANT_INTRANODE |
-                                                     UCG_PLAN_CONNECT_FLAG_WANT_BCAST));
+                                                                                flags);
             (*phs_cnt)++;
         }
         break;

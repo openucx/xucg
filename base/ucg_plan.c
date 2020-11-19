@@ -294,6 +294,69 @@ ucs_status_t ucg_plan_choose(const ucg_collective_params_t *coll_params,
     return UCS_OK;
 }
 
+/*
+ * This function addresses a tricky issue: incast and bcast interfaces use the
+ * loobpack address to establish the connection on the root. However, if the
+ * root address is passed to ucp_ep_create() during ucg_plan_connect(), the
+ * result would always be a local (in-host) connection, never an inter-host
+ * transport (e.g. IB multicast) - because reachability is tested against my
+ * own (loopback) address rather than one of the remote peers. The solution
+ * here is to use ucp_ep_create() to choose the best transport, and then to
+ * re-use the interface (might be IB multicast) to connect the loobpack address
+ * (instead of the address of the remote peer, only used to test reachability).
+ */
+static uct_ep_h ucg_plan_connect_loopback(uct_iface_h iface)
+{
+    uct_ep_h ep;
+    ucs_status_t status;
+    uct_iface_attr_t iface_attr;
+    uct_iface_addr_t *iface_addr;
+    uct_device_addr_t *dev_addr;
+    uct_ep_params_t params;
+
+    status = uct_iface_query(iface, &iface_attr);
+    if (status != UCS_OK) {
+        return NULL;
+    }
+
+    iface_addr = ucs_alloca(iface_attr.iface_addr_len);
+    if (iface_addr == NULL) {
+        ucs_error("error allocating loopback interface address");
+        return NULL;
+    }
+
+    status = uct_iface_get_address(iface, iface_addr);
+    if (status != UCS_OK) {
+        return NULL;
+    }
+
+    dev_addr = ucs_alloca(iface_attr.device_addr_len);
+    if (dev_addr == NULL) {
+        ucs_error("error allocating loopback device address");
+        return NULL;
+    }
+
+    status = uct_iface_get_device_address(iface, dev_addr);
+    if (status != UCS_OK) {
+        return NULL;
+    }
+
+    params.field_mask = UCT_EP_PARAM_FIELD_IFACE |
+                        UCT_EP_PARAM_FIELD_DEV_ADDR |
+                        UCT_EP_PARAM_FIELD_IFACE_ADDR;
+    params.iface      = iface;
+    params.iface_addr = iface_addr;
+    params.dev_addr   = dev_addr;
+
+    status = uct_ep_create(&params, &ep);
+    ucs_assert(status == UCS_OK);
+    if (status != UCS_OK) {
+        ep = NULL;
+    }
+
+    return ep;
+}
+
 ucs_status_t ucg_plan_connect(ucg_group_h group,
                               ucg_group_member_index_t idx,
                               enum ucg_plan_connect_flags flags,
@@ -304,6 +367,8 @@ ucs_status_t ucg_plan_connect(ucg_group_h group,
     ucs_status_t status;
     size_t remote_addr_len;
     ucp_address_t *remote_addr = NULL;
+
+    int is_root = flags & UCG_PLAN_CONNECT_FLAG_AM_ROOT;
 
     /* Look-up the UCP endpoint based on the index */
     ucp_ep_h ucp_ep;
@@ -349,19 +414,23 @@ am_retry:
 #ifdef HAVE_UCT_COLLECTIVES
     if (flags & UCG_PLAN_CONNECT_FLAG_WANT_INCAST) {
         lane = ucp_ep_get_incast_lane(ucp_ep);
+
         if (ucs_unlikely(lane == UCP_NULL_LANE)) {
             ucs_warn("No transports with native incast support were found,"
                      " falling back to P2P transports (slower)");
             return UCS_ERR_UNREACHABLE;
         }
+
         *ep_p = ucp_ep_get_incast_uct_ep(ucp_ep);
     } else if (flags & UCG_PLAN_CONNECT_FLAG_WANT_BCAST) {
         lane = ucp_ep_get_bcast_lane(ucp_ep);
+
         if (ucs_unlikely(lane == UCP_NULL_LANE)) {
             ucs_warn("No transports with native broadcast support were found,"
                      " falling back to P2P transports (slower)");
             return UCS_ERR_UNREACHABLE;
         }
+
         *ep_p = ucp_ep_get_bcast_uct_ep(ucp_ep);
     } else
 #endif /* HAVE_UCT_COLLECTIVES */
@@ -390,6 +459,11 @@ am_retry:
             ucs_empty_function_return_no_resource) {
         ucp_worker_progress(group->worker);
         goto am_retry;
+    }
+
+    if (flags && is_root) {
+        *ep_p = ucg_plan_connect_loopback((*ep_p)->iface);
+        ucs_assert(*ep_p != NULL);
     }
 
     *md_p      = ucp_ep_md(ucp_ep, lane);
