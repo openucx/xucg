@@ -370,6 +370,8 @@ ucs_status_t ucg_plan_connect(ucg_group_h group,
 
     int is_root = flags & UCG_PLAN_CONNECT_FLAG_AM_ROOT;
 
+    ucs_trace("connecting with flags=%u to remote peer #%" PRIx64, flags, idx);
+
     /* Look-up the UCP endpoint based on the index */
     ucp_ep_h ucp_ep;
     khiter_t iter = kh_get(ucg_group_ep, &group->eps, idx);
@@ -462,8 +464,11 @@ am_retry:
     }
 
     if (flags && is_root) {
+        ucs_trace("connecting with flags=%u using a loopback endpoint", flags);
         *ep_p = ucg_plan_connect_loopback((*ep_p)->iface);
         ucs_assert(*ep_p != NULL);
+    } else {
+        ucs_trace("connection successful to remote peer #%" PRIx64, idx);
     }
 
     *md_p      = ucp_ep_md(ucp_ep, lane);

@@ -123,6 +123,10 @@ ucs_status_t ucg_builtin_recursive_create(ucg_builtin_group_ctx_t *ctx,
                                       (alloc_eps    * sizeof(uct_ep_h));
     ucg_builtin_plan_t *recursive   = (ucg_builtin_plan_t*)UCS_ALLOC_CHECK(alloc_size,
                                                                            "recursive topology");
+
+    ucs_trace("recursive plan allocated %u phases and %u endpoints",
+              alloc_phases, alloc_eps);
+
     ucg_builtin_plan_phase_t *phase = &recursive->phss[0];
     uct_ep_h *next_ep               = (uct_ep_h*)(phase + alloc_phases);
     int is_mock                     = coll_type->modifiers &

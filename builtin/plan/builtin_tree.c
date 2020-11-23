@@ -43,8 +43,8 @@ static inline ucs_status_t ucg_builtin_tree_connect_phase(ucg_builtin_plan_phase
     int is_mock = params->coll_type->modifiers & UCG_GROUP_COLLECTIVE_MODIFIER_MOCK_EPS;
 
     ucs_assert(peer_cnt > 0);
-    if ((peer_cnt == 1) || coll_flags) {
 flagless_retry:
+    if ((peer_cnt == 1) || coll_flags) {
         status = ucg_builtin_single_connection_phase(params->ctx,
                 peers[0], step_index, method, coll_flags, phase, is_mock);
 
@@ -254,11 +254,8 @@ ucs_status_t ucg_builtin_tree_connect(ucg_builtin_plan_t *tree,
         return status;
     }
 
-    /* For the sake of later creation of non-zero-rooted trees - store params */
-    if (!step_offset) {
-        memcpy(phase, params, sizeof(*params));
-        tree->ep_cnt = iter_eps - first_ep;
-    }
+    tree->ep_cnt = iter_eps - first_ep;
+
     return UCS_OK;
 }
 
@@ -535,6 +532,10 @@ ucs_status_t ucg_builtin_tree_create(ucg_builtin_group_ctx_t *ctx,
     /* Allocate worst-case memory footprint, resized down later */
     ucg_builtin_plan_t *tree =
             (ucg_builtin_plan_t*)UCS_ALLOC_CHECK(ALLOC_SIZE(UCG_BUILTIN_TREE_MAX_RADIX), "buitin_tree");
+
+    ucs_trace("recursive plan allocated %u phases and %u endpoints",
+              MAX_PHASES, UCG_BUILTIN_TREE_MAX_RADIX);
+
     ucs_list_head_init(&tree->by_root);
     tree->phs_cnt = 0;
     tree->ep_cnt  = 0;
