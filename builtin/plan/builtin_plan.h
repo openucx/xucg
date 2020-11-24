@@ -49,7 +49,6 @@ typedef struct ucg_builtin_plan_phase {
         uct_ep_h                     *multi_eps;     /* endpoint pointer array */
         uct_ep_h                      single_ep;     /* single endpoint handle */
     };
-    uint64_t                         *resends;       /* (per-group) step resend bitfield */
     uint8_t                           ep_cnt;        /* Number of endpoints (below) */
     uint16_t                          host_proc_cnt; /* Number of members per host */
     ucg_step_idx_t                    step_index;    /* determines step index */

@@ -65,14 +65,6 @@ struct ucg_builtin_group_ctx {
      */
     ucg_builtin_comp_slot_t   slots[UCG_BUILTIN_MAX_CONCURRENT_OPS];
 
-    /*
-     * Resend slots is a bit-field indicating which slots require re-sending,
-     * typically due to insufficient buffers on the receiver side (indicated by
-     * UCS_ERR_NO_RESOURCES during the UCT call). On progress calls, all these
-     * steps will be resumed by calling @ref ucg_builtin_step_execute on each.
-     */
-    uint64_t                  resend_slots;
-
     /* Mostly control-path, from here on */
     ucg_builtin_ctx_t        *bctx;          /**< global context */
     ucg_group_h               group;         /**< group handle */
@@ -157,10 +149,11 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_am_handler,
         data    = header + 1;
         length -= sizeof(ucg_builtin_header_t);
 
-        ucg_builtin_step_recv_cb(&slot->req, header->remote_offset, data, length);
-
         ucs_trace_req("ucg_builtin_am_handler CB: coll_id %u step_idx %u pending %u",
                       header->msg.coll_id, header->msg.step_idx, slot->req.pending);
+
+        ucg_builtin_step_recv_cb(&slot->req, header->remote_offset, data, length);
+
         return UCS_OK;
     }
 
@@ -278,7 +271,6 @@ static ucs_status_t ucg_builtin_create(ucg_plan_ctx_h pctx,
     gctx->group_params            = params;
     gctx->host_proc_cnt           = ucg_builtin_calc_host_proc_cnt(params);
     gctx->bctx                    = bctx;
-    gctx->resend_slots            = 0; /* No pending resends */
 
     ucs_list_head_init(&gctx->plan_head);
     ucs_ptr_array_set(&bctx->group_by_id, params->id, gctx);
@@ -847,7 +839,6 @@ ucs_status_t ucg_builtin_connect(ucg_builtin_group_ctx_t *ctx,
 #endif
 
     /* Store the endpoint as part of the phase */
-    phase->resends = &ctx->resend_slots;
     phase->host_proc_cnt = ctx->host_proc_cnt;
     if (phase_ep_index == UCG_BUILTIN_CONNECT_SINGLE_EP) {
         phase->single_ep = ep;
