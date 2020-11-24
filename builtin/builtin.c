@@ -257,6 +257,8 @@ static ucs_status_t ucg_builtin_create(ucg_plan_ctx_h pctx,
                                        ucg_group_h group,
                                        const ucg_group_params_t *params)
 {
+    ucp_worker_h worker = ucg_plan_get_group_worker(group);
+
     if (!ucs_test_all_flags(params->field_mask, UCG_BUILTIN_PARAM_MASK)) {
         ucs_error("UCG Planner \"Builtin\" is missing some group parameters");
         return UCS_ERR_INVALID_PARAM;
@@ -267,7 +269,7 @@ static ucs_status_t ucg_builtin_create(ucg_plan_ctx_h pctx,
     ucg_builtin_group_ctx_t *gctx = ctx;
     gctx->group_id                = params->id;
     gctx->group                   = group;
-    gctx->worker                  = ucg_plan_get_group_worker(group);
+    gctx->worker                  = worker;
     gctx->group_params            = params;
     gctx->host_proc_cnt           = ucg_builtin_calc_host_proc_cnt(params);
     gctx->bctx                    = bctx;
