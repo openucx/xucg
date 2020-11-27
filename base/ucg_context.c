@@ -383,6 +383,14 @@ ucs_status_t ucg_init_version(unsigned ucg_api_major_version,
     memmove(UCS_PTR_BYTE_OFFSET(tmp, headroom), tmp, sizeof(ucp_context_t));
 #endif
 
+#if ENABLE_ASSERT
+    /* Issue a warning to prevent measuring performance with a debug version */
+    if (ucp_params_arg->peer_info.global_idx == 0) {
+        printf("Note: UCG was built with some debugging enabled, and it should "
+               "not be used for performance measurement.\n");
+    }
+#endif
+
     *context_p = ucs_container_of(*context_p, ucg_context_t, ucp_ctx);
     status     = ucg_context_init(*context_p);
     if (status != UCS_OK) {
