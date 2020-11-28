@@ -193,57 +193,17 @@ void ucg_plan_finalize(ucg_plan_desc_t *descs, unsigned desc_cnt,
     }
 }
 
-static ucs_status_t ucg_plan_group_setup(ucg_group_h group)
-{
-    UCS_V_UNUSED int kh_dummy;
-    UCS_V_UNUSED size_t length;
-    UCS_V_UNUSED ucp_address_t *address;
-
-    /* Create a loopback connection, since resolve_cb may fail loopback */
-    ucp_worker_h worker = group->worker;
-    ucs_status_t status = ucp_worker_get_address(worker, &address, &length);
-    if (status != UCS_OK) {
-        return status;
-    }
-
-    ucp_ep_h loopback_ep;
-    ucp_ep_params_t ep_params = {
-            .field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS,
-            .address    = address
-    };
-
-    status = ucp_ep_create(worker, &ep_params, &loopback_ep);
-    ucp_worker_release_address(worker, address);
-    if (status != UCS_OK) {
-        return status;
-    }
-
-    kh_init_inplace(ucg_group_ep, &group->eps);
-
-    /* Store this loopback endpoint, for future reference */
-    ucg_group_member_index_t my_index = group->params.member_index;
-    ucs_assert(kh_get(ucg_group_ep, &group->eps, my_index) == kh_end(&group->eps));
-    khiter_t iter = kh_put(ucg_group_ep, &group->eps, my_index, &kh_dummy);
-    kh_value(&group->eps, iter) = loopback_ep;
-
-    return UCS_OK;
-}
-
 ucs_status_t ucg_plan_group_create(ucg_group_h group)
 {
-    ucs_status_t status = ucg_plan_group_setup(group);
-    if (status != UCS_OK) {
-        return status;
-    }
-
     ucg_group_foreach(group) {
         /* Create the per-planner per-group context */
-        status = comp->create(pctx, gctx, group, &group->params);
+        ucs_status_t status = comp->create(pctx, gctx, group, &group->params);
         if (status != UCS_OK) {
             return status;
         }
     }
 
+    kh_init_inplace(ucg_group_ep, &group->eps);
 
     return UCS_OK;
 }
