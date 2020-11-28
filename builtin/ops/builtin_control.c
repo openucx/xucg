@@ -1023,6 +1023,7 @@ ucs_status_t ucg_builtin_step_create_rkey_bcast(ucg_builtin_plan_t *plan,
                                                 const ucg_collective_params_t *params,
                                                 ucg_builtin_op_step_t *step)
 {
+    ucg_collective_params_t step_params;
 
     ucg_builtin_op_step_t *zcopy_step = step + 1;
     ucg_group_member_index_t root     = UCG_PARAM_TYPE(params).root;
@@ -1041,7 +1042,7 @@ ucs_status_t ucg_builtin_step_create_rkey_bcast(ucg_builtin_plan_t *plan,
     uint8_t *info_buffer      = UCS_ALLOC_CHECK(total_size, "builtin_rkey_info");
 
     /* Set some parameters for step creation */
-    ucg_collective_params_t step_params = {0};
+    memset(&step_params, 0, sizeof(step_params));
     UCG_PARAM_TYPE(&step_params).modifiers = is_bcast |
                                              UCG_GROUP_COLLECTIVE_MODIFIER_SINGLE_SOURCE;
     UCG_PARAM_TYPE(&step_params).root      = root;
