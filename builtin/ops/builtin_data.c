@@ -459,16 +459,6 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
                 status = _send_func (req, step, *ep_iter,                      \
                                      _is_pipelined | _var_stride);             \
                 if (ucs_unlikely(UCS_STATUS_IS_ERR(status))) {                 \
-                    if (ucs_likely(status == UCS_ERR_NO_RESOURCE)) {           \
-                        /* 2nd chance! */                                      \
-                        (void) uct_iface_progress(step->uct_iface);            \
-                        status = _send_func (req, step, *ep_iter,              \
-                                             _is_pipelined | _var_stride);     \
-                        if (ucs_likely(status == UCS_OK)) {                    \
-                            continue;                                          \
-                        }                                                      \
-                    }                                                          \
-                    /* Store pointer, e.g. if UCS_ERR_NO_RESOURCE persists */  \
                     step->iter_ep = ep_iter - phase->multi_eps;                \
                     goto step_execute_error;                                   \
                 }                                                              \
@@ -641,13 +631,9 @@ step_execute_error:
             step->iter_offset = UCG_BUILTIN_OFFSET_PIPELINE_PENDING;
         }
 
-        /* TODO: Set this slot as "pending a resend"
-        status = ucs_async_add_timer(async_mode, iface->async.tick,
-                                     uct_ud_iface_timer, iface, async,
-                                     &iface->async.timer_id);
-        ucs_atomic_or64(phase->resends, UCS_BIT(step->am_header.msg.coll_id %
-                                                UCG_BUILTIN_MAX_CONCURRENT_OPS));
-        */
+        /* Add this request to the resend-queue */
+        ucg_builtin_req_enqueue_resend(req->op->gctx, req);
+
         return UCS_INPROGRESS;
     }
 

@@ -121,11 +121,13 @@ ucs_status_t ucg_plan_query(ucg_plan_desc_t **desc_p, unsigned *num_desc_p,
 ucs_status_t ucg_plan_init(ucg_plan_desc_t *descs, unsigned desc_cnt,
                            ucg_plan_ctx_h plan, size_t *per_group_ctx_size)
 {
+    ucg_plan_params_t plan_params;
     ucg_plan_config_t *plan_config;
 
     uint8_t am_id     = UCP_AM_ID_LAST;
     void *dummy_group = NULL;
     size_t total_size = 0;
+    plan_params.am_id = &am_id;
 
     ucg_plan_foreach(descs, desc_cnt, plan, dummy_group) {
         ucs_status_t status = ucg_plan_config_read(comp, NULL, NULL, &plan_config);
@@ -149,9 +151,7 @@ ucs_status_t ucg_plan_init(ucg_plan_desc_t *descs, unsigned desc_cnt,
         ucs_assert_always(am_id < UCP_AM_ID_LAST);
 #endif
 
-        plan_config->am_id = &am_id;
-
-        status = comp->init(plan, plan_config);
+        status = comp->init(plan, &plan_params, plan_config);
 
         uct_config_release(plan_config);
 

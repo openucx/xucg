@@ -23,13 +23,12 @@
 
 BEGIN_C_DECLS
 
-#define UCG_MAX_IFACES (7) /* Why 7? to fit into a cache-line with a counter */
-
 typedef uint8_t                   ucg_coll_id_t;  /* cyclic */
 typedef uint8_t                   ucg_step_idx_t;
 typedef uint32_t                  ucg_offset_t;
 typedef void*                     ucg_plan_ctx_h;
 typedef void*                     ucg_group_ctx_h;
+typedef struct ucg_plan_config    ucg_plan_config_t;
 typedef struct ucg_plan_component ucg_plan_component_t;
 
 extern ucs_list_link_t ucg_plan_components_list;
@@ -79,7 +78,7 @@ enum ucg_plan_flags {
 #define UCG_PLAN_COMPONENT_NAME_MAX (16)
 typedef struct ucg_plan_desc {
     char                  name[UCG_PLAN_COMPONENT_NAME_MAX]; /**< Name */
-    ucg_plan_component_t *component;            /*< Component object */
+    ucg_plan_component_t *component;                 /*< Component object */
     unsigned              modifiers_supported;       /*< @ref enum ucg_collective_modifiers */
     unsigned              flags;                     /*< @ref enum ucg_plan_flags */
 
@@ -92,11 +91,11 @@ typedef struct ucg_plan_desc {
  * "Base" structure which defines planning configuration options.
  * Specific planning components extend this structure.
  *
- * Note: which components are actualy enabled/used is a configuration for UCG.
+ * Note: which components are actually enabled/used is a configuration for UCG.
  */
-typedef struct ucg_plan_config {
+typedef struct ucg_plan_params {
     uint8_t *am_id;  /**< Active-message ID dispenser */
-} ucg_plan_config_t;
+} ucg_plan_params_t;
 
 typedef struct ucg_plan {
     ucs_recursive_spinlock_t lock;
@@ -150,6 +149,7 @@ struct ucg_plan_component {
     ucs_status_t           (*query)   (ucg_plan_desc_t *descs,
                                        unsigned *desc_cnt_p);
     ucs_status_t           (*init)    (ucg_plan_ctx_h ctx,
+                                       ucg_plan_params_t *params,
                                        ucg_plan_config_t *config);
     void                   (*finalize)(ucg_plan_ctx_h ctx);
 
@@ -294,6 +294,15 @@ ucs_status_t ucg_context_set_am_handler(ucg_plan_ctx_h plan_ctx,
                                         uint8_t id,
                                         uct_am_callback_t cb,
                                         uct_am_tracer_t tracer);
+
+/* Helper function for registering Active-Message handlers */
+ucs_status_t ucg_context_set_async_timer(ucs_async_context_t *async,
+                                         ucs_async_event_cb_t cb,
+                                         void *cb_arg,
+                                         ucs_time_t interval,
+                                         int *timer_id_p);
+ucs_status_t ucg_context_unset_async_timer(ucs_async_context_t *async,
+                                           int timer_id);
 
 /* Start/stop pending operations after a barrier has been completed */
 ucs_status_t ucg_collective_acquire_barrier(ucg_group_h group);

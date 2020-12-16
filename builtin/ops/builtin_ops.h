@@ -209,7 +209,6 @@ typedef struct ucg_builtin_op_step {
     };
 } UCS_S_PACKED UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) ucg_builtin_op_step_t;
 
-typedef struct ucg_builtin_comp_slot ucg_builtin_comp_slot_t;
 struct ucg_builtin_op {
     ucg_op_t                 super;
     unsigned                 opt_cnt; /**< optimization count-down */
@@ -220,7 +219,7 @@ struct ucg_builtin_op {
     ucp_datatype_t           recv_dt; /**< Generic receive datatype (if non-contig) */
     ucp_dt_state_t           rstate;  /**< read (send) state - for datatype packing */
     ucp_dt_state_t           wstate;  /**< write (recieve) state - for datatype unpacking */
-    ucg_builtin_comp_slot_t *slots;   /**< slots pointer, for faster initialization */
+    ucg_builtin_group_ctx_t *gctx;    /**< builtin-group context pointer */
     ucg_builtin_op_step_t    steps[]; /**< steps required to complete the operation */
 } UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE);
 
@@ -229,22 +228,22 @@ struct ucg_builtin_op {
  * a request to handle completion and interaction with the user (via API).
  */
 struct ucg_builtin_request {
-    volatile uint32_t         pending;   /**< number of step's pending messages */
-    ucg_builtin_header_step_t expecting; /**< request iterator, mostly here for
-                                              alignment reasons with slot structs */
-    ucg_builtin_op_step_t    *step;      /**< indicator of current step within the op */
-    ucg_builtin_op_t         *op;        /**< operation currently running */
-    void                     *comp_req;  /**< completion status is written here */
+    volatile uint32_t         pending;      /**< number of step's pending messages */
+    ucg_builtin_header_step_t expecting;    /**< Next packet expected (by header) */
+    ucg_builtin_op_step_t    *step;         /**< indicator of current step within the op */
+    ucg_builtin_op_t         *op;           /**< operation currently running */
+    void                     *comp_req;     /**< completion status is written here */
+    ucs_queue_elem_t          resend_queue; /**< membership in the resend queue */
 };
 
 /*
  * Incoming messages are processed for one of the collective operations
  * currently outstanding - arranged as a window (think: TCP) of slots.
  */
-struct ucg_builtin_comp_slot {
+typedef struct ucg_builtin_comp_slot {
     ucg_builtin_request_t req;
     ucs_ptr_array_t       messages;
-} UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE);
+} UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE) ucg_builtin_comp_slot_t;
 
 typedef struct ucg_builtin_ctx {
     ucs_ptr_array_t      group_by_id;
@@ -296,6 +295,9 @@ void         ucg_builtin_op_discard(ucg_op_t *op);
 ucs_status_t ucg_builtin_op_trigger(ucg_op_t *op,
                                     ucg_coll_id_t coll_id,
                                     void *request);
+
+void         ucg_builtin_req_enqueue_resend(ucg_builtin_group_ctx_t *gctx,
+                                            ucg_builtin_request_t *req);
 
 
 /* Callback functions exported for debugging */

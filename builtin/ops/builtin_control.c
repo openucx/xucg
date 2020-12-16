@@ -1257,7 +1257,7 @@ ucs_status_t ucg_builtin_op_create(ucg_plan_t *plan,
     op->super.trigger_f = ucg_builtin_op_trigger;
     op->super.discard_f = ucg_builtin_op_discard;
     op->super.plan      = plan;
-    op->slots           = (ucg_builtin_comp_slot_t*)builtin_plan->slots;
+    op->gctx            = builtin_plan->gctx;
     *new_op             = &op->super;
 
     return UCS_OK;
@@ -1296,7 +1296,9 @@ ucs_status_t ucg_builtin_op_trigger(ucg_op_t *op,
     /* Allocate a "slot" for this operation, from a per-group array of slots */
     ucg_builtin_op_t *builtin_op  = (ucg_builtin_op_t*)op;
     unsigned slot_idx             = coll_id % UCG_BUILTIN_MAX_CONCURRENT_OPS;
-    ucg_builtin_comp_slot_t *slot = &builtin_op->slots[slot_idx];
+    ucg_builtin_comp_slot_t *slot = (ucg_builtin_comp_slot_t*)builtin_op->gctx +
+                                    slot_idx;
+
     if (ucs_unlikely(slot->req.expecting.local_id != 0)) {
         ucs_error("UCG Builtin planner exceeded its concurrent collectives limit.");
         return UCS_ERR_NO_RESOURCE;

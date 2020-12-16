@@ -52,6 +52,14 @@ static ucs_config_field_t ucg_builtin_config_table[] = {
     {"MEM_REG_OPT_CNT", "3", "Operation counter before switching to one-sided sends",
      ucs_offsetof(ucg_builtin_config_t, mem_rma_opt_cnt), UCS_CONFIG_TYPE_UINT},
 
+    {"RESEND_TIMER_TICK", "100ms", "Resolution for (async) resend timer",
+     ucs_offsetof(ucg_builtin_config_t, resend_timer_tick), UCS_CONFIG_TYPE_TIME},
+
+#if ENABLE_FAULT_TOLERANCE
+    {"FT_TIMER_TICK", "100ms", "Resolution for (async) fault-tolerance timer",
+     ucs_offsetof(ucg_builtin_config_t, ft_timer_tick), UCS_CONFIG_TYPE_TIME},
+#endif
+
     {NULL}
 };
 
@@ -69,11 +77,16 @@ struct ucg_builtin_group_ctx {
     ucg_builtin_ctx_t        *bctx;          /**< global context */
     ucg_group_h               group;         /**< group handle */
     ucp_worker_h              worker;        /**< group's worker */
+    ucs_queue_head_t          resend_head;
     const ucg_group_params_t *group_params;  /**< the original group parameters */
     ucg_group_member_index_t  host_proc_cnt; /**< Number of intra-node processes */
     ucg_group_id_t            group_id;      /**< Group identifier */
     ucs_list_link_t           plan_head;     /**< list of plans (for cleanup) */
     ucs_ptr_array_t           faults;        /**< flexible array of faulty members */
+    int                       timer_id;      /**< Async. progress timer ID */
+#if ENABLE_FAULT_TOLERANCE
+    int                       ft_timer_id;   /**< Fault-tolerance timer ID */
+#endif
 };
 
 extern ucg_plan_component_t ucg_builtin_component;
@@ -220,12 +233,64 @@ ucg_builtin_calc_host_proc_cnt(const ucg_group_params_t *group_params)
     return count;
 }
 
+void ucg_builtin_req_enqueue_resend(ucg_builtin_group_ctx_t *gctx,
+                                    ucg_builtin_request_t *req)
+{
+    UCS_ASYNC_BLOCK(&gctx->worker->async);
+
+    ucs_queue_push(&gctx->resend_head, &req->resend_queue);
+
+    UCS_ASYNC_UNBLOCK(&gctx->worker->async);
+}
+
+static void ucg_builtin_async_resend(int id, ucs_event_set_types_t events, void *arg)
+{
+    ucs_queue_head_t resent;
+    ucg_builtin_request_t *req;
+
+    ucg_builtin_group_ctx_t *gctx = arg;
+
+    if (ucs_likely(ucs_queue_is_empty(&gctx->resend_head))) {
+        return;
+    }
+
+    ucs_queue_head_init(&resent);
+    ucs_queue_splice(&resent, &gctx->resend_head);
+
+    ucs_queue_for_each_extract(req, &resent, resend_queue, 1==1) {
+        (void) ucg_builtin_step_execute(req);
+    }
+}
+
+#if ENABLE_FAULT_TOLERANCE
+static void ucg_builtin_async_ft(int id, ucs_event_set_types_t events, void *arg)
+{
+    if ((status == UCS_INPROGRESS) &&
+            !(req->step->flags & UCG_BUILTIN_OP_STEP_FLAG_FT_ONGOING)) {
+        ucg_builtin_plan_phase_t *phase = req->step->phase;
+        if (phase->ep_cnt == 1) {
+            ucg_ft_start(group, phase->indexes[0], phase->single_ep, &phase->handles[0]);
+        } else {
+            unsigned peer_idx = 0;
+            while (peer_idx < phase->ep_cnt) {
+                ucg_ft_start(group, phase->indexes[peer_idx],
+                        phase->multi_eps[peer_idx], &phase->handles[peer_idx]);
+                peer_idx++;
+            }
+        }
+
+        req->step->flags |= UCG_BUILTIN_OP_STEP_FLAG_FT_ONGOING;
+    }
+}
+#endif
+
 static ucs_status_t ucg_builtin_init(ucg_plan_ctx_h pctx,
+                                     ucg_plan_params_t *params,
                                      ucg_plan_config_t *config)
 {
     ucg_builtin_ctx_t *bctx = pctx;
-    bctx->am_id             = *config->am_id;
-    ++*config->am_id;
+    bctx->am_id             = *params->am_id;
+    ++*params->am_id;
 
 #if ENABLE_FAULT_TOLERANCE
     if (ucg_params.fault.mode > UCG_FAULT_IS_FATAL) {
@@ -257,7 +322,10 @@ static ucs_status_t ucg_builtin_create(ucg_plan_ctx_h pctx,
                                        ucg_group_h group,
                                        const ucg_group_params_t *params)
 {
-    ucp_worker_h worker = ucg_plan_get_group_worker(group);
+    ucs_status_t status;
+
+    ucp_worker_h worker        = ucg_plan_get_group_worker(group);
+    ucs_async_context_t *async = &worker->async;
 
     if (!ucs_test_all_flags(params->field_mask, UCG_BUILTIN_PARAM_MASK)) {
         ucs_error("UCG Planner \"Builtin\" is missing some group parameters");
@@ -275,7 +343,27 @@ static ucs_status_t ucg_builtin_create(ucg_plan_ctx_h pctx,
     gctx->bctx                    = bctx;
 
     ucs_list_head_init(&gctx->plan_head);
+    ucs_queue_head_init(&gctx->resend_head);
     ucs_ptr_array_set(&bctx->group_by_id, params->id, gctx);
+
+    ucs_time_t interval = ucs_time_from_sec(bctx->config.resend_timer_tick);
+    status = ucg_context_set_async_timer(async, ucg_builtin_async_resend, gctx,
+                                         interval, &gctx->timer_id);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+
+#if ENABLE_FAULT_TOLERANCE
+    if (ucg_params.fault.mode > UCG_FAULT_IS_FATAL) {
+        interval = ucs_time_from_sec(bctx->config.ft_timer_tick);
+        status = ucg_context_set_async_timer(async, ucg_builtin_async_ft, gctx,
+                                             interval, &gctx->ft_timer_id);
+        if (status != UCS_OK) {
+            return status;
+        }
+    }
+#endif
 
     /* Initialize collective operation slots */
     unsigned i;
@@ -312,10 +400,12 @@ static void ucg_builtin_destroy_plan(ucg_builtin_plan_t *plan)
 
 static void ucg_builtin_destroy(ucg_group_ctx_h ctx)
 {
-    /* Cleanup left-over messages and outstanding operations */
     unsigned i, j;
     ucg_builtin_group_ctx_t *gctx = ctx;
 
+    ucg_context_unset_async_timer(&gctx->worker->async, gctx->timer_id);
+
+    /* Cleanup left-over messages and outstanding operations */
     for (i = 0; i < UCG_BUILTIN_MAX_CONCURRENT_OPS; i++) {
         ucg_builtin_comp_slot_t *slot = &gctx->slots[i];
         if (slot->req.expecting.local_id != 0) {
@@ -353,50 +443,6 @@ static void ucg_builtin_destroy(ucg_group_ctx_h ctx)
 
     /* Note: gctx is freed as part of the group object itself */
 }
-
-/*
-static unsigned ucg_builtin_async_progress(ucg_group_ctx_h ctx)
-{
-    ucg_builtin_group_ctx_t *gctx = ctx;
-    uint64_t resend_slots         = ucs_atomic_swap64(&gctx->resend_slots, 0);
-    if (ucs_likely(resend_slots == 0)) {
-        return 0;
-    }
-
-    unsigned index, ret = 0;
-    ucs_for_each_bit(index, resend_slots) {
-        ucg_builtin_request_t *req = &gctx->slots[index].req;
-        ucs_status_t status = ucg_builtin_step_execute(req);
-        if (status != UCS_INPROGRESS) {
-            if (ucs_unlikely(UCS_STATUS_IS_ERR(status))) {
-                ucs_error("error during UCG progress: %s", ucs_status_string(status));
-            }
-            ret++;
-        }
-    }
-
-#if ENABLE_FAULT_TOLERANCE
-        else if ((status == UCS_INPROGRESS) &&
-                !(req->step->flags & UCG_BUILTIN_OP_STEP_FLAG_FT_ONGOING)) {
-            ucg_builtin_plan_phase_t *phase = req->step->phase;
-            if (phase->ep_cnt == 1) {
-                ucg_ft_start(group, phase->indexes[0], phase->single_ep, &phase->handles[0]);
-            } else {
-                unsigned peer_idx = 0;
-                while (peer_idx < phase->ep_cnt) {
-                    ucg_ft_start(group, phase->indexes[peer_idx],
-                            phase->multi_eps[peer_idx], &phase->handles[peer_idx]);
-                    peer_idx++;
-                }
-            }
-
-            req->step->flags |= UCG_BUILTIN_OP_STEP_FLAG_FT_ONGOING;
-        }
-#endif
-
-    return ret;
-}
-*/
 
 ucs_mpool_ops_t ucg_builtin_plan_mpool_ops = {
     .chunk_alloc   = ucs_mpool_hugetlb_malloc,
@@ -472,8 +518,8 @@ static ucs_status_t ucg_builtin_plan(ucg_group_ctx_h ctx,
 
     ucs_list_add_head(&gctx->plan_head, &plan->list);
 
+    plan->gctx      = gctx;
     plan->config    = config;
-    plan->slots     = &gctx->slots[0];
     plan->am_id     = gctx->bctx->am_id;
     *plan_p         = (ucg_plan_t*)plan;
 
@@ -641,10 +687,6 @@ static void ucg_builtin_print(ucg_plan_t *plan,
             sizeof(ucg_builtin_op_step_t));
     ucs_assert_always(ucs_offsetof(ucg_builtin_op_step_t, fragment_pending) ==
                       UCS_SYS_CACHE_LINE_SIZE);
-    printf("\tRequest: %lu bytes\n", sizeof(ucg_builtin_request_t));
-    printf("\tSlot: %lu bytes\n", sizeof(ucg_builtin_comp_slot_t));
-    printf("\tPer-group context: %lu bytes (including %u slots)\n",
-           sizeof(ucg_builtin_group_ctx_t), UCG_BUILTIN_MAX_CONCURRENT_OPS);
 
     unsigned phase_idx;
     for (phase_idx = 0; phase_idx < builtin_plan->phs_cnt; phase_idx++) {

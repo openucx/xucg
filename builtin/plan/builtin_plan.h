@@ -70,7 +70,7 @@ typedef struct ucg_builtin_config ucg_builtin_config_t;
 typedef struct ucg_builtin_group_ctx ucg_builtin_group_ctx_t;
 typedef struct ucg_builtin_plan {
     ucg_plan_t               super;
-    void                    *slots;   /* slots for builtin operations */
+    ucg_builtin_group_ctx_t *gctx;    /* builtin-group context pointer */
     ucs_list_link_t          list;    /* member of a per-group list of plans */
     ucs_list_link_t          by_root; /* extra phases for non-zero root */
     ucs_mpool_t              op_mp;   /* memory pool for (builtin_)operations */
@@ -190,8 +190,6 @@ ucs_status_t ucg_topo_neighbor_create(ucg_builtin_group_ctx_t *ctx,
         ucg_builtin_plan_t **plan_p);
 
 struct ucg_builtin_config {
-    ucg_plan_config_t              super;
-
     ucg_builtin_tree_config_t      tree;
     ucg_builtin_recursive_config_t recursive;
     ucg_builtin_neighbor_config_t  neighbor;
@@ -200,6 +198,10 @@ struct ucg_builtin_config {
     size_t                         bcopy_max_tx;
     unsigned                       mem_reg_opt_cnt;
     unsigned                       mem_rma_opt_cnt;
+    double                         resend_timer_tick;
+#if ENABLE_FAULT_TOLERANCE
+    double                         ft_timer_tick;
+#endif
 };
 
 #endif

@@ -109,6 +109,45 @@ ucs_status_t ucg_context_set_am_handler(ucg_plan_ctx_h plan_ctx, uint8_t id,
     return UCS_OK;
 }
 
+ucs_status_t ucg_context_set_async_timer(ucs_async_context_t *async,
+                                         ucs_async_event_cb_t cb,
+                                         void *cb_arg,
+                                         ucs_time_t interval,
+                                         int *timer_id_p)
+{
+    ucs_async_mode_t async_mode = async->mode;
+
+    UCS_ASYNC_BLOCK(async);
+
+    ucs_status_t status = ucs_async_add_timer(async_mode, interval, cb,
+                                              cb_arg, async, timer_id_p);
+    if (status != UCS_OK) {
+        ucs_error("unable to add timer handler - %s",
+                  ucs_status_string(status));
+    }
+
+    UCS_ASYNC_UNBLOCK(async);
+
+    return status;
+}
+
+ucs_status_t ucg_context_unset_async_timer(ucs_async_context_t *async,
+                                           int timer_id)
+{
+    UCS_ASYNC_BLOCK(async);
+
+    ucs_status_t status = ucs_async_remove_handler(timer_id, 1);
+    if (status != UCS_OK) {
+        ucs_error("unable to remove timer handler %d - %s",
+                  timer_id, ucs_status_string(status));
+    }
+
+    UCS_ASYNC_UNBLOCK(async);
+
+    return status;
+}
+
+
 static ucs_status_t ucg_context_init(void *groups_ctx)
 {
     ucg_context_t *ctx          = (ucg_context_t*)groups_ctx;
