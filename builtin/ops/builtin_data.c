@@ -199,7 +199,6 @@ ucg_builtin_step_am_bcopy_max(ucg_builtin_request_t *req,
     }
 
     step->am_header.remote_offset = 0;
-    step->iter_offset = 0;
     return UCS_OK;
 }
 
@@ -374,7 +373,6 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
     }
 
     step->am_header.remote_offset = 0;
-    step->iter_offset = 0;
     return UCS_OK;
 }
 
@@ -424,14 +422,13 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
                                                                                \
         /* Perform one or many send operations, unless an error occurs */      \
         if (_is_1ep) {                                                         \
-            if (_var_stride) {                                                 \
-                                                                               \
-            }                                                                  \
-                                                                               \
             status = _send_func (req, step, phase->single_ep,                  \
                                  _is_pipelined | _var_stride);                 \
             if (ucs_unlikely(UCS_STATUS_IS_ERR(status))) {                     \
                 goto step_execute_error;                                       \
+            }                                                                  \
+            if (!(_is_pipelined || _var_stride)) {                             \
+                step->iter_offset = 0;                                         \
             }                                                                  \
         } else {                                                               \
             if ((_is_pipelined) && (ucs_unlikely(step->iter_offset ==          \
@@ -465,6 +462,8 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
                                                                                \
                 if (_fixed_stride) {                                           \
                     step->iter_offset += item_interval;                        \
+                } else if (!(_is_pipelined || _var_stride)) {                  \
+                    step->iter_offset = 0;                                     \
                 }                                                              \
             } while (++ep_iter < ep_last);                                     \
                                                                                \

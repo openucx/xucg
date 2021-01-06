@@ -86,6 +86,9 @@ ucg_builtin_comp_step_cb(ucg_builtin_request_t *req)
 
     ucg_builtin_comp_ft_end_step(next_step - 1);
 
+    ucs_assert(next_step->iter_offset == 0);
+    ucs_assert(next_step->iter_ep == 0);
+
     return ucg_builtin_step_execute(req);
 }
 static void UCS_F_ALWAYS_INLINE
