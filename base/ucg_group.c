@@ -106,6 +106,7 @@ ucs_status_t ucg_group_create(ucp_worker_h worker,
                               ucg_group_h *group_p)
 {
     ucs_status_t status;
+    struct ucg_group *group;
     ucg_context_t *ctx = ucs_container_of(worker->context, ucg_context_t, ucp_ctx);
 
     if (!ucs_test_all_flags(params->field_mask, UCG_GROUP_PARAM_REQUIRED_MASK)) {
@@ -114,11 +115,9 @@ ucs_status_t ucg_group_create(ucp_worker_h worker,
     }
 
     /* Allocate a new group */
-    size_t distance_size    = sizeof(*params->distance) * params->member_count;
-    size_t total_group_size = sizeof(struct ucg_group) +
-                              ctx->per_group_planners_ctx + distance_size;
-    struct ucg_group *group = UCS_ALLOC_CHECK(total_group_size,
-                                              "communicator group");
+    size_t dist_size  = sizeof(*params->distance) * params->member_count;
+    size_t total_size = ctx->per_group_planners_ctx + dist_size;
+    group             = UCS_ALLOC_CHECK(total_size, "communicator group");
 
     /* Fill in the group fields */
     group->is_barrier_outstanding = 0;
@@ -133,15 +132,13 @@ ucs_status_t ucg_group_create(ucp_worker_h worker,
     ucs_queue_head_init(&group->pending);
     memcpy((ucg_group_params_t*)&group->params, params, sizeof(*params));
     // TODO: replace memcpy with per-field copy to improve ABI compatibility
-    group->params.distance = (typeof(params->distance))((char*)(group
-            + 1) + ctx->per_group_planners_ctx);
+    group->params.distance = UCS_PTR_BYTE_OFFSET(group, total_size - dist_size);
 
     if (params->field_mask & UCG_GROUP_PARAM_FIELD_DISTANCES) {
-        memcpy(group->params.distance, params->distance, distance_size);
+        memcpy(group->params.distance, params->distance, dist_size);
     } else {
         /* If the user didn't specify the distances - treat as uniform */
-        memset(group->params.distance, UCG_GROUP_MEMBER_DISTANCE_LAST,
-               distance_size);
+        memset(group->params.distance, UCG_GROUP_MEMBER_DISTANCE_LAST, dist_size);
     }
 
     if ((params->field_mask & UCG_GROUP_PARAM_FIELD_ID) != 0) {
@@ -210,6 +207,11 @@ void ucg_group_destroy(ucg_group_h group)
 #endif
 
     ucs_free(group);
+}
+
+ucg_collective_progress_t ucg_request_get_progress(ucg_coll_h coll)
+{
+    return ((ucg_op_t*)coll)->plan->planner->component->progress;
 }
 
 void ucg_request_cancel(ucg_coll_h coll)

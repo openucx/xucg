@@ -49,7 +49,7 @@ static ucs_config_field_t ucg_builtin_config_table[] = {
     {"MEM_REG_OPT_CNT", "10", "Operation counter before registering the memory",
      ucs_offsetof(ucg_builtin_config_t, mem_reg_opt_cnt), UCS_CONFIG_TYPE_UINT},
 
-    {"MEM_REG_OPT_CNT", "3", "Operation counter before switching to one-sided sends",
+    {"MEM_RMA_OPT_CNT", "3", "Operation counter before switching to one-sided sends",
      ucs_offsetof(ucg_builtin_config_t, mem_rma_opt_cnt), UCS_CONFIG_TYPE_UINT},
 
     {"RESEND_TIMER_TICK", "100ms", "Resolution for (async) resend timer",
@@ -87,7 +87,7 @@ struct ucg_builtin_group_ctx {
 #if ENABLE_FAULT_TOLERANCE
     int                       ft_timer_id;   /**< Fault-tolerance timer ID */
 #endif
-};
+} UCS_V_ALIGNED(UCS_SYS_CACHE_LINE_SIZE);
 
 extern ucg_plan_component_t ucg_builtin_component;
 
@@ -130,6 +130,21 @@ ucg_builtin_choose_topology(enum ucg_collective_modifiers flags,
     return UCS_OK;
 }
 
+static ucs_status_t ucg_builtin_gen_fake_desc(void *data, size_t length,
+                                              ucp_recv_desc_t **rdesc_p)
+{
+    ucp_recv_desc_t *rdesc = UCS_ALLOC_CHECK(sizeof(*rdesc) + length,
+                                             "unexpected rdesc");
+
+    rdesc->length = length;
+
+    // TODO: implement!
+
+    *rdesc_p = rdesc;
+
+    return UCS_OK;
+}
+
 UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_am_handler,
                  (ctx, data, length, am_flags),
                  void *ctx, void *data, size_t length, unsigned am_flags)
@@ -143,53 +158,68 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_am_handler,
     ucg_group_id_t group_id = header->group_id;
     ucs_assert(group_id != 0);
     ucs_assert(group_id < bctx->group_by_id.size);
-    ucg_builtin_group_ctx_t *gctx;
-    if (ucs_unlikely(!ucs_ptr_array_lookup(&bctx->group_by_id, group_id, gctx))) {
-        ucs_error("Invalid group ID to handle: %u", group_id);
-        return UCS_ERR_INVALID_PARAM;
-    }
-    ucs_assert(gctx != NULL);
 
     /* Find the slot to be used, based on the ID received in the header */
     ucg_coll_id_t coll_id = header->msg.coll_id;
-    ucg_builtin_comp_slot_t *slot = &gctx->slots[coll_id % UCG_BUILTIN_MAX_CONCURRENT_OPS];
-    ucs_assert((slot->req.expecting.coll_id != coll_id) ||
-               (slot->req.expecting.step_idx <= header->msg.step_idx));
 
-    /* Consume the message if it fits the current collective and step index */
-    if (ucs_likely(header->msg.local_id == slot->req.expecting.local_id)) {
-        /* Make sure the packet indeed belongs to the collective currently on */
-        data    = header + 1;
-        length -= sizeof(ucg_builtin_header_t);
+    ucs_status_t status;
+    ucp_recv_desc_t *rdesc;
+    ucs_ptr_array_t *msg_array;
+    ucg_builtin_group_ctx_t *gctx;
+    ucg_builtin_comp_slot_t *slot;
+    if (ucs_likely(ucs_ptr_array_lookup(&bctx->group_by_id, group_id, gctx))) {
+        slot = &gctx->slots[coll_id % UCG_BUILTIN_MAX_CONCURRENT_OPS];
+        ucs_assert((slot->req.expecting.coll_id != coll_id) ||
+                   (slot->req.expecting.step_idx <= header->msg.step_idx));
 
-        ucs_trace_req("ucg_builtin_am_handler CB: coll_id %u step_idx %u pending %u",
-                      header->msg.coll_id, header->msg.step_idx, slot->req.pending);
+        /* Consume the message if it fits the current collective and step index */
+        if (ucs_likely(header->msg.local_id == slot->req.expecting.local_id)) {
+            /* Make sure the packet indeed belongs to the collective currently on */
+            data    = header + 1;
+            length -= sizeof(ucg_builtin_header_t);
 
-        ucg_builtin_step_recv_cb(&slot->req, header->remote_offset, data, length);
+            ucs_trace_req("ucg_builtin_am_handler CB: coll_id %u step_idx %u pending %u",
+                          header->msg.coll_id, header->msg.step_idx, slot->req.pending);
 
-        return UCS_OK;
-    }
+            ucg_builtin_step_recv_cb(&slot->req, header->remote_offset, data, length);
 
-    ucs_trace_req("ucg_builtin_am_handler STORE: group_id %u "
-                  "coll_id %u expected_id %u step_idx %u expected_idx %u",
-                  header->group_id, header->msg.coll_id, slot->req.expecting.coll_id,
-                  header->msg.step_idx, slot->req.expecting.step_idx);
+            return UCS_OK;
+        }
+
+        msg_array = &slot->messages;
+        ucs_trace_req("ucg_builtin_am_handler STORE: group_id %u "
+                      "coll_id %u expected_id %u step_idx %u expected_idx %u",
+                      header->group_id, header->msg.coll_id, slot->req.expecting.coll_id,
+                      header->msg.step_idx, slot->req.expecting.step_idx);
 
 #ifdef HAVE_UCT_COLLECTIVES
-    /* In case of a stride - the stored length is actually longer */
-    if (am_flags & UCT_CB_PARAM_FLAG_STRIDE) {
-        length = sizeof(ucg_builtin_header_t) +
-                (length - sizeof(ucg_builtin_header_t)) *
-                (gctx->group_params->member_count - 1);
-    }
+        /* In case of a stride - the stored length is actually longer */
+        if (am_flags & UCT_CB_PARAM_FLAG_STRIDE) {
+            length = sizeof(ucg_builtin_header_t) +
+                    (length - sizeof(ucg_builtin_header_t)) *
+                    (gctx->group_params->member_count - 1);
+        }
+#endif
+        status = ucp_recv_desc_init(gctx->worker, data, length, 0,
+                                    am_flags, 0, 0, 0, &rdesc);
+
+    } else {
+        if (!ucs_ptr_array_lookup(&bctx->unexpected, group_id, msg_array)) {
+            msg_array = UCS_ALLOC_CHECK(sizeof(*msg_array), "unexpected group");
+            ucs_ptr_array_init(msg_array, "unexpected group messages");
+            ucs_ptr_array_set(&bctx->unexpected, group_id, msg_array);
+        }
+
+#ifdef HAVE_UCT_COLLECTIVES
+        ucs_assert((am_flags & UCT_CB_PARAM_FLAG_STRIDE) == 0);
 #endif
 
+        status = ucg_builtin_gen_fake_desc(data, length, &rdesc);
+    }
+
     /* Store the message (if the relevant step has not been reached) */
-    ucp_recv_desc_t *rdesc;
-    ucs_status_t status = ucp_recv_desc_init(gctx->worker, data, length, 0,
-                                             am_flags, 0, 0, 0, &rdesc);
-    if (ucs_likely(status != UCS_ERR_NO_MEMORY)) {
-        (void) ucs_ptr_array_insert(&slot->messages, rdesc);
+    if (ucs_likely(!UCS_STATUS_IS_ERR(status))) {
+        (void) ucs_ptr_array_insert(msg_array, rdesc);
     }
     return status;
 }
@@ -243,16 +273,11 @@ void ucg_builtin_req_enqueue_resend(ucg_builtin_group_ctx_t *gctx,
     UCS_ASYNC_UNBLOCK(&gctx->worker->async);
 }
 
-static void ucg_builtin_async_resend(int id, ucs_event_set_types_t events, void *arg)
+static UCS_F_ALWAYS_INLINE
+void ucg_builtin_async_resend(ucg_builtin_group_ctx_t *gctx)
 {
     ucs_queue_head_t resent;
     ucg_builtin_request_t *req;
-
-    ucg_builtin_group_ctx_t *gctx = arg;
-
-    if (ucs_likely(ucs_queue_is_empty(&gctx->resend_head))) {
-        return;
-    }
 
     ucs_queue_head_init(&resent);
     ucs_queue_splice(&resent, &gctx->resend_head);
@@ -260,6 +285,18 @@ static void ucg_builtin_async_resend(int id, ucs_event_set_types_t events, void 
     ucs_queue_for_each_extract(req, &resent, resend_queue, 1==1) {
         (void) ucg_builtin_step_execute(req);
     }
+}
+
+static void ucg_builtin_async_check(int id, ucs_event_set_types_t events, void *arg)
+{
+
+    ucg_builtin_group_ctx_t *gctx = arg;
+
+    if (ucs_likely(ucs_queue_is_empty(&gctx->resend_head))) {
+        return;
+    }
+
+    ucg_builtin_async_resend(gctx);
 }
 
 #if ENABLE_FAULT_TOLERANCE
@@ -284,6 +321,29 @@ static void ucg_builtin_async_ft(int id, ucs_event_set_types_t events, void *arg
 }
 #endif
 
+static unsigned ucg_builtin_op_progress(ucg_coll_h op)
+{
+    ucg_builtin_op_t *builtin_op   = (ucg_builtin_op_t*)op;
+    ucg_builtin_op_step_t *current = *(builtin_op->current);
+
+    unsigned ret = uct_iface_progress(current->uct_iface);
+    if (ucs_likely(ret > 0)) {
+        return ret;
+    }
+
+    ucg_builtin_group_ctx_t *gctx = builtin_op->gctx;
+    if (!ucs_queue_is_empty(&gctx->resend_head)) {
+        UCS_ASYNC_BLOCK(&gctx->worker->async);
+
+        ucg_builtin_async_resend(builtin_op->gctx);
+
+        UCS_ASYNC_UNBLOCK(&gctx->worker->async);
+        return 1;
+    }
+
+    return 0;
+}
+
 static ucs_status_t ucg_builtin_init(ucg_plan_ctx_h pctx,
                                      ucg_plan_params_t *params,
                                      ucg_plan_config_t *config)
@@ -305,6 +365,7 @@ static ucs_status_t ucg_builtin_init(ucg_plan_ctx_h pctx,
     }
 
     ucs_ptr_array_init(&bctx->group_by_id, "builtin_group_table");
+    ucs_ptr_array_init(&bctx->unexpected, "builtin_unexpected_table");
 
     return ucg_context_set_am_handler(pctx, bctx->am_id,
                                       ucg_builtin_am_handler,
@@ -335,7 +396,8 @@ static ucs_status_t ucg_builtin_create(ucg_plan_ctx_h pctx,
     /* Fill in the information in the per-group context */
     ucg_builtin_ctx_t* bctx       = pctx;
     ucg_builtin_group_ctx_t *gctx = ctx;
-    gctx->group_id                = params->id;
+    ucg_group_id_t group_id       = params->id;
+    gctx->group_id                = group_id;
     gctx->group                   = group;
     gctx->worker                  = worker;
     gctx->group_params            = params;
@@ -344,15 +406,14 @@ static ucs_status_t ucg_builtin_create(ucg_plan_ctx_h pctx,
 
     ucs_list_head_init(&gctx->plan_head);
     ucs_queue_head_init(&gctx->resend_head);
-    ucs_ptr_array_set(&bctx->group_by_id, params->id, gctx);
+    ucs_ptr_array_set(&bctx->group_by_id, group_id, gctx);
 
     ucs_time_t interval = ucs_time_from_sec(bctx->config.resend_timer_tick);
-    status = ucg_context_set_async_timer(async, ucg_builtin_async_resend, gctx,
+    status = ucg_context_set_async_timer(async, ucg_builtin_async_check, gctx,
                                          interval, &gctx->timer_id);
     if (status != UCS_OK) {
         return status;
     }
-
 
 #if ENABLE_FAULT_TOLERANCE
     if (ucg_params.fault.mode > UCG_FAULT_IS_FATAL) {
@@ -365,12 +426,32 @@ static ucs_status_t ucg_builtin_create(ucg_plan_ctx_h pctx,
     }
 #endif
 
-    /* Initialize collective operation slots */
+    /* Initialize collective operation slots, incl. already pending messages */
     unsigned i;
+    ucs_ptr_array_t *by_group_id, *by_slot_id;
+    int is_msg_pending = ucs_ptr_array_lookup(&bctx->unexpected,
+                                              group_id,
+                                              by_group_id);
+
     for (i = 0; i < UCG_BUILTIN_MAX_CONCURRENT_OPS; i++) {
         ucg_builtin_comp_slot_t *slot = &gctx->slots[i];
-        ucs_ptr_array_init(&slot->messages, "builtin messages");
+
+        if (is_msg_pending &&
+            (ucs_ptr_array_lookup(by_group_id, i, by_slot_id))) {
+            ucs_ptr_array_remove(by_group_id, i);
+            memcpy(&slot->messages, by_slot_id, sizeof(*by_slot_id));
+            ucs_free(by_slot_id);
+        } else {
+            ucs_ptr_array_init(&slot->messages, "builtin messages");
+        }
+
         slot->req.expecting.local_id = 0;
+    }
+
+    if (is_msg_pending) {
+        ucs_ptr_array_remove(&bctx->unexpected, group_id);
+        ucs_ptr_array_cleanup(by_group_id);
+        ucs_free(by_group_id);
     }
 
     return UCS_OK;
@@ -928,6 +1009,6 @@ UCG_PLAN_COMPONENT_DEFINE(ucg_builtin_component, "builtin",
                           ucg_builtin_finalize, ucg_builtin_create,
                           ucg_builtin_destroy, ucg_builtin_plan,
                           ucg_builtin_op_create, ucg_builtin_op_trigger,
-                          ucg_builtin_op_discard, ucg_builtin_print,
-                          ucg_builtin_handle_fault, "BUILTIN_",
+                          ucg_builtin_op_progress, ucg_builtin_op_discard,
+                          ucg_builtin_print, ucg_builtin_handle_fault, "BUILTIN_",
                           ucg_builtin_config_table, ucg_builtin_config_t);

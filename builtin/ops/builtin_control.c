@@ -349,6 +349,7 @@ ucs_status_t ucg_builtin_op_consider_optimization(ucg_builtin_op_t *op,
     do {
         step = &op->steps[step_idx++];
         if ((step->flags & UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_BCOPY) &&
+            (step->phase->iface_attr->cap.flags & UCT_IFACE_FLAG_AM_ZCOPY) &&
             (step->phase->md_attr->cap.max_reg > step->buffer_length)) {
             op->optm_cb = ucg_builtin_optimize_am_bcopy_to_zcopy;
             op->opt_cnt = config->mem_reg_opt_cnt;
@@ -1312,6 +1313,7 @@ ucs_status_t ucg_builtin_op_trigger(ucg_op_t *op,
     builtin_req->pending               = first_step->fragments_total;
     builtin_req->comp_req              = request;
     first_step->am_header.msg.coll_id  = coll_id;
+    builtin_op->current                = &builtin_req->step;
 
     /* Sanity checks */
     ucs_assert(first_step->am_header.msg.step_idx != 0);

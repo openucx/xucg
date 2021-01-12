@@ -211,6 +211,7 @@ typedef struct ucg_builtin_op_step {
 
 struct ucg_builtin_op {
     ucg_op_t                 super;
+    ucg_builtin_op_step_t  **current; /**< points to the current step executed */
     unsigned                 opt_cnt; /**< optimization count-down */
     ucg_builtin_op_optm_cb_t optm_cb; /**< optimization function for the operation */
     ucg_builtin_op_init_cb_t init_cb; /**< Initialization function for the operation */
@@ -248,6 +249,7 @@ typedef struct ucg_builtin_comp_slot {
 typedef struct ucg_builtin_ctx {
     ucs_ptr_array_t      group_by_id;
     uint16_t             am_id;
+    ucs_ptr_array_t      unexpected;
     ucg_builtin_config_t config;
 } ucg_builtin_ctx_t;
 

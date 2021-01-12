@@ -448,6 +448,20 @@ ucs_status_t ucg_collective_start(ucg_coll_h coll, void *req);
 
 /**
  * @ingroup UCG_COLLECTIVE
+ * @brief Obtain the progress function to be applied to a collective operation.
+ *
+ * This routine returns a pointer to another one. The latter would explicitly
+ * progresses a single collective operation request.
+ *
+ * @param [in]  coll        Collective operation handle.
+ *
+ * @return A valid function pointer.
+ */
+ucg_collective_progress_t ucg_request_get_progress(ucg_coll_h coll);
+
+
+/**
+ * @ingroup UCG_COLLECTIVE
  * @brief Cancel an outstanding collective request.
  *
  * @param [in]  coll        Collective operation handle.

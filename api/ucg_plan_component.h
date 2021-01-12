@@ -66,7 +66,7 @@ typedef double (*ucg_plan_estimator_f)(ucg_plan_plogp_params_t plogp,
  */
 enum ucg_plan_flags {
     UCG_PLAN_FLAG_PLOGP_LATENCY_ESTIMATOR = 0, /*< Supports PlogP latency estimation */
-    UCG_PLAN_FLAG_FAULT_TOLERANCE_SUPPORT = 1, /*< Supported custom fault tolerance */
+    UCG_PLAN_FLAG_FAULT_TOLERANCE_SUPPORT = 1  /*< Supported custom fault tolerance */
 };
 
 /**
@@ -94,7 +94,8 @@ typedef struct ucg_plan_desc {
  * Note: which components are actually enabled/used is a configuration for UCG.
  */
 typedef struct ucg_plan_params {
-    uint8_t *am_id;  /**< Active-message ID dispenser */
+    ucp_worker_h worker; /**< UCP Worker to use for */
+    uint8_t *am_id;      /**< Active-message ID dispenser */
 } ucg_plan_params_t;
 
 typedef struct ucg_plan {
@@ -118,24 +119,24 @@ typedef ucs_status_t (*ucg_op_trigger_f)(ucg_op_t *op,
 typedef void         (*ucg_op_discard_f)(ucg_op_t *op);
 struct ucg_op {
     /* Collective-specific request content */
-    ucg_op_trigger_f         trigger_f;   /**< shortcut for the trigger call */
-    ucg_op_discard_f         discard_f;   /**< shortcut for the discard call */
+    ucg_op_trigger_f          trigger_f;   /**< shortcut for the trigger call */
+    ucg_op_discard_f          discard_f;   /**< shortcut for the discard call */
 
     union {
-        ucs_list_link_t      list;        /**< cache list member */
+        ucs_list_link_t       list;        /**< cache list member */
         struct {
-            ucs_queue_elem_t queue;       /**< pending queue member */
-            void            *pending_req; /**< original invocation request */
+            ucs_queue_elem_t  queue;       /**< pending queue member */
+            void             *pending_req; /**< original invocation request */
         };
     };
 
-    ucg_plan_t              *plan;        /**< The group this belongs to */
+    ucg_plan_t               *plan;        /**< The group this belongs to */
 
-    ucg_collective_params_t  params;      /**< original parameters for it */
-    /* Note: the params field must be 64-byte-aligned */
+    ucg_collective_params_t   params;      /**< original parameters for it */
+    /* Note: the params field must be 64-byte-aligned, for 512-bit SIMD ISA */
 
     /* Component-specific request content */
-    char                     priv[0];
+    char                      priv[0];
 };
 
 struct ucg_plan_component {
@@ -171,6 +172,9 @@ struct ucg_plan_component {
                                        ucg_op_t **op);
     /* Trigger an operation to start, generate a request handle for updates */
     ucg_op_trigger_f         trigger;
+
+    /* Progress an outstanding operation */
+    ucg_collective_progress_t progress;
 
     /* Discard an operation previously prepared */
     ucg_op_discard_f         discard;
@@ -216,8 +220,9 @@ struct ucg_plan_component {
  */
 #define UCG_PLAN_COMPONENT_DEFINE(_planc, _name, _global_size, _group_size, \
                                   _query, _init, _finalize, _create, _destroy, \
-                                  _plan, _prepare, _trigger, _discard, _print, \
-                                  _fault, _cfg_prefix, _cfg_table, _cfg_struct) \
+                                  _plan, _prepare, _trigger, _progress, \
+                                  _discard, _print, _fault, _cfg_prefix, \
+                                  _cfg_table, _cfg_struct) \
     ucg_plan_component_t _planc = { \
         .name               = _name, \
         .config.name        = _name" planner",\
@@ -234,6 +239,7 @@ struct ucg_plan_component {
         .plan               = _plan, \
         .prepare            = _prepare, \
         .trigger            = _trigger, \
+        .progress           = _progress, \
         .discard            = _discard, \
         .print              = _print, \
         .fault              = _fault \

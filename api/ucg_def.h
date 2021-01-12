@@ -118,4 +118,17 @@ typedef uint64_t                         ucg_group_member_index_t;
  */
 typedef void (*ucg_collective_callback_t)(void *request, ucs_status_t status);
 
+/**
+ * @ingroup UCG_GROUP
+ * @brief Progress a specific collective operation request.
+ *
+ * This routine would explicitly progress a collective operation request.
+ *
+ * @param [in]  coll      The collective operation to be progressed.
+ *
+ * @return Non-zero if any communication was progressed, zero otherwise.
+ *
+ */
+typedef unsigned (*ucg_collective_progress_t)(ucg_coll_h coll);
+
 #endif

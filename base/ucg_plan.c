@@ -36,14 +36,17 @@ __KHASH_IMPL(ucg_group_ep, static UCS_F_MAYBE_UNUSED inline,
          idx < (_desc_cnt); \
          idx++, (_descs)++, \
          (_plan_ctx) = UCS_PTR_BYTE_OFFSET((_plan_ctx), comp->global_ctx_size), \
-         (_grp_ctx) = UCS_PTR_BYTE_OFFSET((_grp_ctx), comp->per_group_ctx_size), \
+         (_grp_ctx)  = UCS_PTR_BYTE_OFFSET((_grp_ctx), \
+                           ucs_align_up(comp->per_group_ctx_size, \
+                                        UCS_SYS_CACHE_LINE_SIZE)), \
          comp = (idx < (_desc_cnt)) ? (_descs)->component : NULL)
 
 #define ucg_group_foreach(_group) \
     ucg_plan_desc_t *descs = (_group)->context->planners; \
     unsigned desc_cnt      = (_group)->context->num_planners; \
     ucg_plan_ctx_h pctx    = (_group)->context->planners_ctx; \
-    ucg_group_ctx_h gctx   = (_group) + 1; \
+    ucg_group_ctx_h gctx   = (void*)ucs_align_up((uintptr_t)(_group + 1), \
+                                                 UCS_SYS_CACHE_LINE_SIZE); \
     ucg_plan_foreach(descs, desc_cnt, pctx, gctx)
 
 static ucs_status_t ucg_plan_config_read(ucg_plan_component_t *component,
@@ -125,8 +128,7 @@ ucs_status_t ucg_plan_init(ucg_plan_desc_t *descs, unsigned desc_cnt,
     ucg_plan_config_t *plan_config;
 
     uint8_t am_id     = UCP_AM_ID_LAST;
-    void *dummy_group = NULL;
-    size_t total_size = 0;
+    void *dummy_group = (void*)(sizeof(ucg_group_t) + UCS_SYS_CACHE_LINE_SIZE);
     plan_params.am_id = &am_id;
 
     ucg_plan_foreach(descs, desc_cnt, plan, dummy_group) {
@@ -159,8 +161,6 @@ ucs_status_t ucg_plan_init(ucg_plan_desc_t *descs, unsigned desc_cnt,
             ucs_warn("failed to initialize planner %s: %m", descs->name);
             continue;
         }
-
-        total_size += comp->per_group_ctx_size;
     }
 
 #if ENABLE_FAULT_TOLERANCE
@@ -172,7 +172,7 @@ ucs_status_t ucg_plan_init(ucg_plan_desc_t *descs, unsigned desc_cnt,
     }
 #endif
 
-    *per_group_ctx_size = total_size;
+    *per_group_ctx_size = (size_t)dummy_group;
 
     return UCS_OK;
 }
@@ -249,7 +249,7 @@ ucs_status_t ucg_plan_choose(const ucg_collective_params_t *coll_params,
     ucs_assert(group->context->num_planners == 1); // TODO: support more...
 
     *desc_p = group->context->planners;
-    *gctx_p = group + 1;
+    *gctx_p = (void*)ucs_align_up((uintptr_t)(group + 1), UCS_SYS_CACHE_LINE_SIZE);
 
     return UCS_OK;
 }

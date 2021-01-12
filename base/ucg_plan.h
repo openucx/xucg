@@ -21,8 +21,6 @@ void ucg_plan_finalize(ucg_plan_desc_t *descs, unsigned desc_cnt,
 
 ucs_status_t ucg_plan_group_create(ucg_group_h group);
 
-unsigned ucg_plan_group_progress(ucg_group_h group);
-
 void ucg_plan_group_destroy(ucg_group_h group);
 
 void ucg_plan_print_info(ucg_plan_desc_t *descs, unsigned desc_cnt, FILE *stream);
