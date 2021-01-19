@@ -735,7 +735,6 @@ zcopy_redo:
 
     /* Do any special assignment w.r.t. the src/dst buffers in this step */
     int is_send            = 0;
-    int is_no_recv         = 0;
     int is_send_after_recv = 0;
     int is_pipelined       = 0;
     int is_reduction       = 0;
@@ -747,7 +746,6 @@ zcopy_redo:
     case UCG_PLAN_METHOD_SEND_TO_SM_ROOT:
     case UCG_PLAN_METHOD_SCATTER_TERMINAL:
         is_send = 1;
-        is_no_recv = 1;
         if (init_cb != NULL) {
             if (is_barrier) {
                 ucs_assert(fini_cb != NULL);
@@ -889,17 +887,6 @@ zcopy_redo:
             }
 
             if (!is_send_dt_contig) {
-                ucs_assert(*init_cb == NULL);
-                ucs_assert(*fini_cb == NULL);
-
-                if (!is_recv_dt_contig && !is_no_recv) {
-                    *init_cb = ucg_builtin_init_pack_and_unpack;
-                    *fini_cb = ucg_builtin_finalize_pack_and_unpack;
-                } else {
-                    *init_cb = ucg_builtin_init_pack;
-                    *fini_cb = ucg_builtin_finalize_pack;
-                }
-
                 step->comp_flags |= UCG_BUILTIN_OP_STEP_COMP_FLAG_PACKED_DATATYPE;
             }
         }
@@ -925,12 +912,6 @@ zcopy_redo:
 #endif
     } else {
         if (!is_recv_dt_contig) {
-            ucs_assert(*init_cb == NULL);
-            ucs_assert(*fini_cb == NULL);
-
-            *init_cb = ucg_builtin_init_unpack;
-            *fini_cb = ucg_builtin_finalize_unpack;
-
             step->comp_flags |= UCG_BUILTIN_OP_STEP_COMP_FLAG_PACKED_DATATYPE;
         } else {
             step->buffer_length = params->recv.count * send_dt_len;
@@ -1244,6 +1225,28 @@ ucs_status_t ucg_builtin_op_create(ucg_plan_t *plan,
     }
     if (ucs_unlikely(status != UCS_OK)) {
         goto op_cleanup;
+    }
+
+    /* Handle non-contiguous datatypes */
+    // TODO: handle send-only or recieve-only collectives where the other
+    //       datatype should be disregarded, contiguous or not.
+    if (!is_send_dt_contig) {
+        ucs_assert(op->init_cb == NULL);
+        ucs_assert(op->fini_cb == NULL);
+
+        if (!is_recv_dt_contig) {
+            op->init_cb = ucg_builtin_init_pack_and_unpack;
+            op->fini_cb = ucg_builtin_finalize_pack_and_unpack;
+        } else {
+            op->init_cb = ucg_builtin_init_pack;
+            op->fini_cb = ucg_builtin_finalize_pack;
+        }
+    } else if (!is_recv_dt_contig) {
+        ucs_assert(op->init_cb == NULL);
+        ucs_assert(op->fini_cb == NULL);
+
+        op->init_cb = ucg_builtin_init_unpack;
+        op->fini_cb = ucg_builtin_finalize_unpack;
     }
 
     /* Select the right optimization callback */
