@@ -130,21 +130,6 @@ ucg_builtin_choose_topology(enum ucg_collective_modifiers flags,
     return UCS_OK;
 }
 
-static ucs_status_t ucg_builtin_gen_fake_desc(void *data, size_t length,
-                                              ucp_recv_desc_t **rdesc_p)
-{
-    ucp_recv_desc_t *rdesc = UCS_ALLOC_CHECK(sizeof(*rdesc) + length,
-                                             "unexpected rdesc");
-
-    rdesc->length = length;
-
-    // TODO: implement!
-
-    *rdesc_p = rdesc;
-
-    return UCS_OK;
-}
-
 UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_am_handler,
                  (ctx, data, length, am_flags),
                  void *ctx, void *data, size_t length, unsigned am_flags)
@@ -157,17 +142,17 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_am_handler,
     /* Find the Group context, based on the ID received in the header */
     ucg_group_id_t group_id = header->group_id;
     ucs_assert(group_id != 0);
-    ucs_assert(group_id < bctx->group_by_id.size);
-
-    /* Find the slot to be used, based on the ID received in the header */
-    ucg_coll_id_t coll_id = header->msg.coll_id;
+    ucs_assert(bctx->group_by_id.size > group_id);
 
     ucs_status_t status;
     ucp_recv_desc_t *rdesc;
     ucs_ptr_array_t *msg_array;
-    ucg_builtin_group_ctx_t *gctx;
     ucg_builtin_comp_slot_t *slot;
-    if (ucs_likely(ucs_ptr_array_lookup(&bctx->group_by_id, group_id, gctx))) {
+
+    ucg_builtin_group_ctx_t *gctx = (void*)bctx->group_by_id.start[group_id];
+    if (ucs_likely(!__ucs_ptr_array_is_free(gctx))) {
+        /* Find the slot to be used, based on the ID received in the header */
+        ucg_coll_id_t coll_id = header->msg.coll_id;
         slot = &gctx->slots[coll_id % UCG_BUILTIN_MAX_CONCURRENT_OPS];
         ucs_assert((slot->req.expecting.coll_id != coll_id) ||
                    (slot->req.expecting.step_idx <= header->msg.step_idx));
@@ -200,9 +185,6 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_am_handler,
                     (gctx->group_params->member_count - 1);
         }
 #endif
-        status = ucp_recv_desc_init(gctx->worker, data, length, 0,
-                                    am_flags, 0, 0, 0, &rdesc);
-
     } else {
         if (!ucs_ptr_array_lookup(&bctx->unexpected, group_id, msg_array)) {
             msg_array = UCS_ALLOC_CHECK(sizeof(*msg_array), "unexpected group");
@@ -210,17 +192,29 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_am_handler,
             ucs_ptr_array_set(&bctx->unexpected, group_id, msg_array);
         }
 
+        /*
+         * Note: because this message arrived before the corresponding local
+         *       group has been created, we don't know what is the number
+         *       of processes in the group - so we don't know how many items
+         *       to expect in this vector (we only know the size of one item).
+         *       TODO: resolve this corner case... use elem->pending?
+         */
 #ifdef HAVE_UCT_COLLECTIVES
-        ucs_assert((am_flags & UCT_CB_PARAM_FLAG_STRIDE) == 0);
+        ucs_assert_always((am_flags & UCT_CB_PARAM_FLAG_STRIDE) == 0);
 #endif
-
-        status = ucg_builtin_gen_fake_desc(data, length, &rdesc);
     }
+
+    uint64_t data_offset = (ucs_unlikely(am_flags & UCT_CB_PARAM_FLAG_SHIFTED)) ?
+            ((uint64_t*)header)[-1] : 0;
+
+    status = ucp_recv_desc_init(bctx->worker, data, length, (int)data_offset,
+                                am_flags, 0, 0, 0, &rdesc);
 
     /* Store the message (if the relevant step has not been reached) */
     if (ucs_likely(!UCS_STATUS_IS_ERR(status))) {
         (void) ucs_ptr_array_insert(msg_array, rdesc);
     }
+
     return status;
 }
 
@@ -283,7 +277,7 @@ void ucg_builtin_async_resend(ucg_builtin_group_ctx_t *gctx)
     ucs_queue_splice(&resent, &gctx->resend_head);
 
     ucs_queue_for_each_extract(req, &resent, resend_queue, 1==1) {
-        (void) ucg_builtin_step_execute(req);
+        (void) ucg_builtin_step_execute(req, req->step->am_header);
     }
 }
 
@@ -323,10 +317,11 @@ static void ucg_builtin_async_ft(int id, ucs_event_set_types_t events, void *arg
 
 static unsigned ucg_builtin_op_progress(ucg_coll_h op)
 {
-    ucg_builtin_op_t *builtin_op   = (ucg_builtin_op_t*)op;
-    ucg_builtin_op_step_t *current = *(builtin_op->current);
+    ucg_builtin_op_t *builtin_op        = (ucg_builtin_op_t*)op;
+    ucg_builtin_op_step_t *current_step = *(builtin_op->current);
+    uct_iface_progress_func_t progress  = current_step->uct_progress;
 
-    unsigned ret = uct_iface_progress(current->uct_iface);
+    unsigned ret = progress(current_step->uct_iface);
     if (ucs_likely(ret > 0)) {
         return ret;
     }
@@ -403,10 +398,12 @@ static ucs_status_t ucg_builtin_create(ucg_plan_ctx_h pctx,
     gctx->group_params            = params;
     gctx->host_proc_cnt           = ucg_builtin_calc_host_proc_cnt(params);
     gctx->bctx                    = bctx;
+    bctx->worker                  = worker;
 
     ucs_list_head_init(&gctx->plan_head);
     ucs_queue_head_init(&gctx->resend_head);
     ucs_ptr_array_set(&bctx->group_by_id, group_id, gctx);
+    ucs_assert_always(((uintptr_t)gctx % UCS_SYS_CACHE_LINE_SIZE) == 0);
 
     ucs_time_t interval = ucs_time_from_sec(bctx->config.resend_timer_tick);
     status = ucg_context_set_async_timer(async, ucg_builtin_async_check, gctx,
@@ -446,6 +443,7 @@ static ucs_status_t ucg_builtin_create(ucg_plan_ctx_h pctx,
         }
 
         slot->req.expecting.local_id = 0;
+        slot->req.am_id              = bctx->am_id;
     }
 
     if (is_msg_pending) {
@@ -766,8 +764,6 @@ static void ucg_builtin_print(ucg_plan_t *plan,
             sizeof(ucg_builtin_op_t) + builtin_plan->phs_cnt *
             sizeof(ucg_builtin_op_step_t), builtin_plan->phs_cnt,
             sizeof(ucg_builtin_op_step_t));
-    ucs_assert_always(ucs_offsetof(ucg_builtin_op_step_t, fragment_pending) ==
-                      UCS_SYS_CACHE_LINE_SIZE);
 
     unsigned phase_idx;
     for (phase_idx = 0; phase_idx < builtin_plan->phs_cnt; phase_idx++) {
@@ -905,7 +901,9 @@ static void ucg_builtin_print(ucg_plan_t *plan,
 }
 
 #define UCG_BUILTIN_CONNECT_SINGLE_EP ((unsigned)-1)
-static uct_iface_attr_t mock_ep_attr;
+static uct_iface_attr_t mock_ep_attr = {0};
+static uct_iface_t mock_iface = {0};
+static uct_ep_t mock_ep = { .iface = &mock_iface };
 
 ucs_status_t ucg_builtin_connect(ucg_builtin_group_ctx_t *ctx,
                                  ucg_group_member_index_t idx,
@@ -928,8 +926,6 @@ ucs_status_t ucg_builtin_connect(ucg_builtin_group_ctx_t *ctx,
 #endif
     if (is_mock) {
         // TODO: allocate mock attributes according to flags (and later free it)
-        memset(&mock_ep_attr, 0, sizeof(mock_ep_attr));
-
 #ifdef HAVE_UCT_COLLECTIVES
         unsigned dtype_support                 = UCS_MASK(UCT_COLL_DTYPE_MODE_LAST);
         mock_ep_attr.cap.flags                 = UCT_IFACE_FLAG_AM_SHORT |
@@ -944,6 +940,12 @@ ucs_status_t ucg_builtin_connect(ucg_builtin_group_ctx_t *ctx,
         phase->host_proc_cnt                   = 0;
         phase->iface_attr                      = &mock_ep_attr;
         phase->md                              = NULL;
+
+        if (phase_ep_index == UCG_BUILTIN_CONNECT_SINGLE_EP) {
+            phase->single_ep = &mock_ep;
+        } else {
+            phase->multi_eps[phase_ep_index] = &mock_ep;
+        }
 
         return UCS_OK;
     }

@@ -156,7 +156,7 @@ typedef struct ucg_builtin_op_step {
 #define UCG_BUILTIN_OFFSET_PIPELINE_PENDING ((ucg_offset_t)-2)
     /* TODO: consider modifying "send_buffer" and removing iter_offset */
 
-    uint8_t                    am_id;
+    uint8_t                    reserved;
     uint8_t                    ep_cnt;
     uint8_t                    batch_cnt;
 
@@ -172,13 +172,15 @@ typedef struct ucg_builtin_op_step {
     /* --- 32 bytes --- */
 
     ucg_builtin_header_t       am_header;
-    uct_iface_h                uct_iface;
-
+    void                      *uct_send;
     uint64_t                   fragments_total; /* != 1 for fragmented operations */
     uint32_t                   fragment_length; /* only for fragmented operations */
     ucg_offset_t               iter_offset;     /* iterator, somewhat volatile */
 
     /* --- 64 bytes --- */
+
+    void                      *uct_progress;
+    uct_iface_h                uct_iface;
 
     /* To enable pipelining of fragmented messages, each fragment has a counter,
      * similar to the request's overall "pending" counter. Once it reaches zero,
@@ -231,6 +233,7 @@ struct ucg_builtin_op {
 struct ucg_builtin_request {
     volatile uint32_t         pending;      /**< number of step's pending messages */
     ucg_builtin_header_step_t expecting;    /**< Next packet expected (by header) */
+    uint8_t                   am_id;        /**< Active Message Identifier */
     ucg_builtin_op_step_t    *step;         /**< indicator of current step within the op */
     ucg_builtin_op_t         *op;           /**< operation currently running */
     void                     *comp_req;     /**< completion status is written here */
@@ -249,6 +252,7 @@ typedef struct ucg_builtin_comp_slot {
 typedef struct ucg_builtin_ctx {
     ucs_ptr_array_t      group_by_id;
     uint16_t             am_id;
+    ucp_worker_h         worker;
     ucs_ptr_array_t      unexpected;
     ucg_builtin_config_t config;
 } ucg_builtin_ctx_t;
@@ -270,7 +274,8 @@ ucs_status_t ucg_builtin_step_create_rkey_bcast(ucg_builtin_plan_t *plan,
                                                 const ucg_collective_params_t *params,
                                                 ucg_builtin_op_step_t *step);
 
-ucs_status_t ucg_builtin_step_execute(ucg_builtin_request_t *req);
+ucs_status_t ucg_builtin_step_execute(ucg_builtin_request_t *req,
+                                      ucg_builtin_header_t header);
 
 ucs_status_t ucg_builtin_step_zcopy_prep(ucg_builtin_op_step_t *step);
 

@@ -127,9 +127,9 @@ ucs_status_t ucg_plan_init(ucg_plan_desc_t *descs, unsigned desc_cnt,
     ucg_plan_params_t plan_params;
     ucg_plan_config_t *plan_config;
 
-    uint8_t am_id     = UCP_AM_ID_LAST;
-    void *dummy_group = (void*)(sizeof(ucg_group_t) + UCS_SYS_CACHE_LINE_SIZE);
-    plan_params.am_id = &am_id;
+    uint8_t am_id      = UCP_AM_ID_LAST;
+    void *dummy_group  = (void*)(sizeof(ucg_group_t) + UCS_SYS_CACHE_LINE_SIZE);
+    plan_params.am_id  = &am_id;
 
     ucg_plan_foreach(descs, desc_cnt, plan, dummy_group) {
         ucs_status_t status = ucg_plan_config_read(comp, NULL, NULL, &plan_config);

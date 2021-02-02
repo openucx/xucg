@@ -154,6 +154,8 @@ ucs_status_t ucg_group_create(ucp_worker_h worker,
         goto cleanup_group;
     }
 
+    // TODO: status = ucg_group_wireup_coll_ifaces(group); // based on my index
+
     status = UCS_STATS_NODE_ALLOC(&group->stats,
                                   &ucg_group_stats_class,
                                   worker->stats, "-%p", group);
@@ -223,6 +225,7 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_collective_create,
         (group, params, coll), ucg_group_h group,
         const ucg_collective_params_t *params, ucg_coll_h *coll)
 {
+    int is_match;
     ucg_op_t *op;
     ucs_status_t status;
 
@@ -232,7 +235,6 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_collective_create,
 
     /* check the recycling/cache for this collective */
     if (ucs_likely(plan != NULL)) {
-
         UCG_GROUP_THREAD_CS_ENTER(plan)
 
         ucs_list_for_each(op, &plan->op_head, list) {
@@ -242,10 +244,17 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_collective_create,
                               UCS_SYS_CACHE_LINE_SIZE);
 
 #ifdef HAVE_UCP_EXTENSIONS
-            if (ucs_cpu_cache_line_is_equal(params, &op->params)) {
+#ifdef __AVX512F__
+            /* Only apply AVX512 to broadcast - otherwise risk CPU down-clocking! */
+            if (plan->my_index == 0) {
 #else
-            if (memcmp(params, &op->params, UCS_SYS_CACHE_LINE_SIZE) == 0) {
+            if (1) {
 #endif
+                is_match = ucs_cpu_cache_line_is_equal(params, &op->params);
+            } else
+#endif
+            is_match = (memcmp(params, &op->params, UCS_SYS_CACHE_LINE_SIZE) == 0);
+            if (is_match) {
                 ucs_list_del(&op->list);
                 UCG_GROUP_THREAD_CS_EXIT(plan);
                 status = UCS_OK;

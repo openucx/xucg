@@ -94,7 +94,6 @@ typedef struct ucg_plan_desc {
  * Note: which components are actually enabled/used is a configuration for UCG.
  */
 typedef struct ucg_plan_params {
-    ucp_worker_h worker; /**< UCP Worker to use for */
     uint8_t *am_id;      /**< Active-message ID dispenser */
 } ucg_plan_params_t;
 

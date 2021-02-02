@@ -27,7 +27,9 @@
 ucs_status_t static UCS_F_ALWAYS_INLINE
 ucg_builtin_step_dummy_send(ucg_builtin_request_t *req,
                             ucg_builtin_op_step_t *step,
-                            uct_ep_h ep, int var_stride)
+                            uct_ep_h ep, uint8_t am_id,
+                            ucg_builtin_header_t header,
+                            int var_stride)
 {
     return UCS_OK;
 }
@@ -35,32 +37,38 @@ ucg_builtin_step_dummy_send(ucg_builtin_request_t *req,
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucg_builtin_step_am_short_common(ucg_builtin_request_t *req,
                                  ucg_builtin_op_step_t *step,
-                                 uct_ep_h ep, uint8_t *buffer,
-                                 size_t length)
+                                 uct_ep_h ep, uint8_t am_id,
+                                 ucg_builtin_header_t header,
+                                 uint8_t *buffer, size_t length)
 {
+    uct_ep_am_short_func_t ep_am_short = step->uct_send;
+
     UCG_BUILTIN_ASSERT_SEND(step, AM_SHORT);
 
-    return step->uct_iface->ops.ep_am_short(ep, step->am_id,
-                                            step->am_header.header,
-                                            buffer, length);
+    return ep_am_short(ep, am_id, header.header, buffer, length);
 }
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucg_builtin_step_am_short_one(ucg_builtin_request_t *req,
                               ucg_builtin_op_step_t *step,
-                              uct_ep_h ep, int var_stride)
+                              uct_ep_h ep, uint8_t am_id,
+                              ucg_builtin_header_t header,
+                              int var_stride)
 {
     size_t length;
     uint8_t *buffer;
     ucg_builtin_step_get_local_address(step, var_stride, &buffer, &length);
 
-    return ucg_builtin_step_am_short_common(req, step, ep, buffer, length);
+    return ucg_builtin_step_am_short_common(req, step, ep, am_id, header,
+                                            buffer, length);
 }
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucg_builtin_step_am_short_rkey(ucg_builtin_request_t *req,
                                ucg_builtin_op_step_t *step,
-                               uct_ep_h ep, int var_stride)
+                               uct_ep_h ep, uint8_t am_id,
+                               ucg_builtin_header_t header,
+                               int var_stride)
 {
     size_t length;
     uint8_t *buffer;
@@ -68,16 +76,18 @@ ucg_builtin_step_am_short_rkey(ucg_builtin_request_t *req,
 
     ucg_builtin_step_set_remote_address(step, &buffer);
 
-    return ucg_builtin_step_am_short_common(req, step, ep, buffer, length);
+    return ucg_builtin_step_am_short_common(req, step, ep, am_id, header,
+                                            buffer, length);
 }
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucg_builtin_step_am_short_max(ucg_builtin_request_t *req,
                               ucg_builtin_op_step_t *step,
-                              uct_ep_h ep, int is_pipelined)
+                              uct_ep_h ep, uint8_t am_id,
+                              ucg_builtin_header_t am_iter,
+                              int is_pipelined)
 {
     ucs_status_t status;
-    unsigned am_id               = step->am_id;
     ucg_offset_t frag_size       = step->fragment_length;
     int is_packed                = ((step->flags &
                                      UCG_BUILTIN_OP_STEP_FLAG_PACKED_DTYPE_MODE)
@@ -87,10 +97,7 @@ ucg_builtin_step_am_short_max(ucg_builtin_request_t *req,
     int8_t *sbuf                 = step->send_buffer;
     int8_t *buffer_iter          = sbuf + step->iter_offset;
     int8_t *buffer_iter_limit    = sbuf + step->buffer_length - frag_size;
-    ucg_builtin_header_t am_iter = { .header = step->am_header.header };
     am_iter.remote_offset       += step->iter_offset;
-    ucs_status_t (*ep_am_short)(uct_ep_h, uint8_t, uint64_t, const void*, unsigned) =
-            step->uct_iface->ops.ep_am_short;
 
     UCG_BUILTIN_ASSERT_SEND(step, AM_SHORT);
     ucs_assert(step->iter_offset != UCG_BUILTIN_OFFSET_PIPELINE_READY);
@@ -102,6 +109,7 @@ ucg_builtin_step_am_short_max(ucg_builtin_request_t *req,
 #endif
 
     /* send every fragment but the last */
+    uct_ep_am_short_func_t ep_am_short = step->uct_send;
     if (ucs_likely(buffer_iter < buffer_iter_limit)) {
         do {
             status = ep_am_short(ep, am_id, am_iter.header, buffer_iter, frag_size);
@@ -131,7 +139,9 @@ ucg_builtin_step_am_short_max(ucg_builtin_request_t *req,
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucg_builtin_step_am_bcopy_one(ucg_builtin_request_t *req,
                               ucg_builtin_op_step_t *step,
-                              uct_ep_h ep, int var_stride)
+                              uct_ep_h ep, uint8_t am_id,
+                              ucg_builtin_header_t header,
+                              int var_stride)
 {
     unsigned uct_flags;
     if (ucs_unlikely(step->flags & UCG_BUILTIN_OP_STEP_FLAG_BCOPY_PACK_LOCK)) {
@@ -142,9 +152,9 @@ ucg_builtin_step_am_bcopy_one(ucg_builtin_request_t *req,
 
     UCG_BUILTIN_ASSERT_SEND(step, AM_BCOPY);
 
-    ssize_t len = step->uct_iface->ops.ep_am_bcopy(ep, step->am_id,
-                                                   step->bcopy.pack_single_cb,
-                                                   req, uct_flags);
+    uct_ep_am_bcopy_func_t ep_am_bcopy = step->uct_send;
+    ssize_t len = ep_am_bcopy(ep, am_id, step->bcopy.pack_single_cb,
+                              req, uct_flags);
 
     return (ucs_unlikely(len < 0)) ? (ucs_status_t)len : UCS_OK;
 }
@@ -152,13 +162,14 @@ ucg_builtin_step_am_bcopy_one(ucg_builtin_request_t *req,
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucg_builtin_step_am_bcopy_max(ucg_builtin_request_t *req,
                               ucg_builtin_op_step_t *step,
-                              uct_ep_h ep, int is_pipelined)
+                              uct_ep_h ep, uint8_t am_id,
+                              ucg_builtin_header_t header,
+                              int is_pipelined)
 {
     ssize_t len;
-    unsigned am_id          = step->am_id;
     ucg_offset_t frag_size  = step->fragment_length;
     ucg_offset_t iter_limit = step->buffer_length - frag_size;
-    packed_send_t send_func = step->uct_iface->ops.ep_am_bcopy;
+    packed_send_t send_func = step->uct_send;
 
     unsigned uct_flags;
     if (ucs_unlikely(step->flags & UCG_BUILTIN_OP_STEP_FLAG_BCOPY_PACK_LOCK)) {
@@ -181,13 +192,19 @@ ucg_builtin_step_am_bcopy_max(ucg_builtin_request_t *req,
                 return ucs_unlikely(len < 0) ? (ucs_status_t)len : UCS_OK;
             }
 
-            step->am_header.remote_offset += frag_size;
+            header.remote_offset += frag_size;
             step->iter_offset             += frag_size;
         } while ((len >= 0) && (step->iter_offset < iter_limit));
 
         if (ucs_unlikely(len < 0)) {
-            step->am_header.remote_offset -= frag_size;
-            step->iter_offset             -= frag_size;
+            header.remote_offset -= frag_size;
+            step->iter_offset    -= frag_size;
+            step->am_header       = header;
+            /*
+             * TODO: step->am_header might be overwritten later, in
+             *       the check_pending() call - need to prevent this!
+             */
+
             return (ucs_status_t)len;
         }
     }
@@ -205,9 +222,15 @@ ucg_builtin_step_am_bcopy_max(ucg_builtin_request_t *req,
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucg_builtin_step_zcopy_common(ucg_builtin_request_t *req,
                               ucg_builtin_op_step_t *step,
-                              uct_ep_h ep, uint8_t *buffer,
-                              size_t length, unsigned type)
+                              uct_ep_h ep, uint8_t am_id,
+                              ucg_builtin_header_t header,
+                              uint8_t *buffer, size_t length,
+                              unsigned type)
 {
+    uct_ep_am_zcopy_func_t ep_am_zcopy;
+    uct_ep_put_zcopy_func_t ep_put_zcopy;
+    uct_ep_get_zcopy_func_t ep_get_zcopy;
+
     uct_iov_t iov = {
             .buffer = buffer,
             .length = length,
@@ -222,24 +245,21 @@ ucg_builtin_step_zcopy_common(ucg_builtin_request_t *req,
     ucs_status_t status;
     switch (type) {
     case UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_ZCOPY:
-        status = step->uct_iface->ops.ep_am_zcopy(ep, step->am_id,
-                                                  &step->am_header,
-                                                  sizeof(step->am_header),
-                                                  &iov, 1, 0, &zcomp->comp);
+        ep_am_zcopy = step->uct_send;
+        status = ep_am_zcopy(ep, am_id, &header, sizeof(header),
+                             &iov, 1, 0, &zcomp->comp);
         break;
 
     case UCG_BUILTIN_OP_STEP_FLAG_SEND_PUT_ZCOPY:
-        status = step->uct_iface->ops.ep_put_zcopy(ep, &iov, 1,
-                                                   step->zcopy.raddr,
-                                                   step->zcopy.rkey.rkey,
-                                                   &zcomp->comp);
+        ep_put_zcopy = step->uct_send;
+        status = ep_put_zcopy(ep, &iov, 1, step->zcopy.raddr,
+                              step->zcopy.rkey.rkey, &zcomp->comp);
         break;
 
     case UCG_BUILTIN_OP_STEP_FLAG_SEND_GET_ZCOPY:
-        status = step->uct_iface->ops.ep_get_zcopy(ep, &iov, 1,
-                                                   step->zcopy.raddr,
-                                                   step->zcopy.rkey.rkey,
-                                                   &zcomp->comp);
+        ep_get_zcopy = step->uct_send;
+        status = ep_get_zcopy(ep, &iov, 1, step->zcopy.raddr,
+                              step->zcopy.rkey.rkey, &zcomp->comp);
         break;
 
     default:
@@ -252,7 +272,9 @@ ucg_builtin_step_zcopy_common(ucg_builtin_request_t *req,
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucg_builtin_step_am_zcopy_one(ucg_builtin_request_t *req,
                               ucg_builtin_op_step_t *step,
-                              uct_ep_h ep, int var_stride)
+                              uct_ep_h ep, uint8_t am_id,
+                              ucg_builtin_header_t header,
+                              int var_stride)
 {
     size_t length;
     uint8_t *buffer;
@@ -260,14 +282,16 @@ ucg_builtin_step_am_zcopy_one(ucg_builtin_request_t *req,
 
     UCG_BUILTIN_ASSERT_SEND(step, AM_ZCOPY);
 
-    return ucg_builtin_step_zcopy_common(req, step, ep, buffer, length,
+    return ucg_builtin_step_zcopy_common(req, step, ep, am_id, header, buffer, length,
                                          UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_ZCOPY);
 }
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucg_builtin_step_am_zcopy_rkey(ucg_builtin_request_t *req,
                                ucg_builtin_op_step_t *step,
-                               uct_ep_h ep, int var_stride)
+                               uct_ep_h ep, uint8_t am_id,
+                               ucg_builtin_header_t header,
+                               int var_stride)
 {
     size_t length;
     uint8_t *buffer;
@@ -277,14 +301,16 @@ ucg_builtin_step_am_zcopy_rkey(ucg_builtin_request_t *req,
 
     UCG_BUILTIN_ASSERT_SEND(step, AM_ZCOPY);
 
-    return ucg_builtin_step_zcopy_common(req, step, ep, buffer, length,
+    return ucg_builtin_step_zcopy_common(req, step, ep, am_id, header, buffer, length,
                                          UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_ZCOPY);
 }
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucg_builtin_step_put_zcopy_one(ucg_builtin_request_t *req,
                                ucg_builtin_op_step_t *step,
-                               uct_ep_h ep, int var_stride)
+                               uct_ep_h ep, uint8_t am_id,
+                               ucg_builtin_header_t header,
+                               int var_stride)
 {
     size_t length;
     uint8_t *buffer;
@@ -292,14 +318,16 @@ ucg_builtin_step_put_zcopy_one(ucg_builtin_request_t *req,
 
     UCG_BUILTIN_ASSERT_SEND(step, PUT_ZCOPY);
 
-    return ucg_builtin_step_zcopy_common(req, step, ep, buffer, length,
+    return ucg_builtin_step_zcopy_common(req, step, ep, am_id, header, buffer, length,
                                          UCG_BUILTIN_OP_STEP_FLAG_SEND_PUT_ZCOPY);
 }
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucg_builtin_step_get_zcopy_one(ucg_builtin_request_t *req,
                                ucg_builtin_op_step_t *step,
-                               uct_ep_h ep, int var_stride)
+                               uct_ep_h ep, uint8_t am_id,
+                               ucg_builtin_header_t header,
+                               int var_stride)
 {
     size_t length;
     uint8_t *buffer;
@@ -307,24 +335,22 @@ ucg_builtin_step_get_zcopy_one(ucg_builtin_request_t *req,
 
     UCG_BUILTIN_ASSERT_SEND(step, GET_ZCOPY);
 
-    return ucg_builtin_step_zcopy_common(req, step, ep, buffer, length,
+    return ucg_builtin_step_zcopy_common(req, step, ep, am_id, header, buffer, length,
                                          UCG_BUILTIN_OP_STEP_FLAG_SEND_GET_ZCOPY);
 }
 
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
                               ucg_builtin_op_step_t *step,
-                              uct_ep_h ep, int is_pipelined)
+                              uct_ep_h ep, uint8_t am_id,
+                              ucg_builtin_header_t header,
+                              int is_pipelined)
 {
     ucs_status_t status;
-    unsigned am_id             = step->am_id;
     ucg_offset_t frag_size     = step->fragment_length;
     int8_t *sbuf               = step->send_buffer;
     void* iov_buffer_limit     = sbuf + step->buffer_length - frag_size;
     ucg_builtin_zcomp_t *zcomp = &step->zcopy.zcomp;
-    ucs_status_t (*ep_am_zcopy)(uct_ep_h, uint8_t, const void*, unsigned,
-            const uct_iov_t*, size_t, unsigned, uct_completion_t*) =
-                    step->uct_iface->ops.ep_am_zcopy;
 
     uct_iov_t iov = {
             .buffer = sbuf + step->iter_offset,
@@ -339,24 +365,25 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
     ucs_assert(step->iter_offset != UCG_BUILTIN_OFFSET_PIPELINE_PENDING);
 
     /* check if this is not, by any chance, the last fragment */
+    uct_ep_am_zcopy_func_t ep_am_zcopy = step->uct_send;
     if (ucs_likely(iov.buffer < iov_buffer_limit)) {
         /* send every fragment but the last */
         do {
-            status = ep_am_zcopy(ep, am_id, &step->am_header,
-                                 sizeof(step->am_header), &iov,
-                                 1, 0, &zcomp->comp);
+            status = ep_am_zcopy(ep, am_id, &header, sizeof(header),
+                                 &iov, 1, 0, &zcomp->comp);
             (zcomp++)->req = req;
 
             if (is_pipelined) {
                 return status;
             }
 
-            step->am_header.remote_offset += frag_size;
+            header.remote_offset += frag_size;
             iov.buffer = (void*)((int8_t*)iov.buffer + frag_size);
         } while ((status == UCS_INPROGRESS) && (iov.buffer < iov_buffer_limit));
 
         if (ucs_unlikely(status != UCS_INPROGRESS)) {
             step->iter_offset = (int8_t*)iov.buffer - sbuf - frag_size;
+            step->am_header = header;
             return status;
         }
     }
@@ -364,11 +391,11 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
     /* Send last fragment of the message */
     zcomp->req = req;
     iov.length = sbuf + step->buffer_length - (int8_t*)iov.buffer;
-    status     = ep_am_zcopy(ep, am_id, &step->am_header,
-                             sizeof(step->am_header),
+    status     = ep_am_zcopy(ep, am_id, &header, sizeof(header),
                              &iov, 1, 0, &zcomp->comp);
     if (ucs_unlikely(status != UCS_INPROGRESS)) {
         step->iter_offset = (int8_t*)iov.buffer - sbuf;
+        step->am_header = header;
         return status;
     }
 
@@ -396,8 +423,8 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
                                                                                \
         is_zcopy = (_send_flag) & UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_ZCOPY;      \
         if (_is_pipelined) {                                                   \
-            frags_per_ep = req->step->fragments_total / req->step->ep_cnt;     \
-            ucs_assert(!(req->step->fragments_total % req->step->ep_cnt));     \
+            frags_per_ep = step->fragments_total / step->ep_cnt;               \
+            ucs_assert(!(step->fragments_total % step->ep_cnt));               \
         }                                                                      \
                                                                                \
         if ((_is_rs1 || _is_r1s) && (step->iter_ep == 0)) {                    \
@@ -407,8 +434,7 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
             }                                                                  \
             if (!is_zcopy) {                                                   \
                 if (!_is_pipelined) {                                          \
-                    frags_per_ep = req->step->fragments_total /                \
-                                   req->step->ep_cnt;                          \
+                    frags_per_ep = step->fragments_total / step->ep_cnt;       \
                 }                                                              \
                 req->pending = new_cnt * frags_per_ep;                         \
             } /* Otherwise default init of ep_cnt*num_fragments is correct */  \
@@ -422,7 +448,7 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
                                                                                \
         /* Perform one or many send operations, unless an error occurs */      \
         if (_is_1ep) {                                                         \
-            status = _send_func (req, step, phase->single_ep,                  \
+            status = _send_func (req, step, phase->single_ep, am_id, header,   \
                                  _is_pipelined | _var_stride);                 \
             if (ucs_unlikely(UCS_STATUS_IS_ERR(status))) {                     \
                 goto step_execute_error;                                       \
@@ -453,7 +479,7 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
             }                                                                  \
                                                                                \
             do {                                                               \
-                status = _send_func (req, step, *ep_iter,                      \
+                status = _send_func (req, step, *ep_iter, am_id, header,       \
                                      _is_pipelined | _var_stride);             \
                 if (ucs_unlikely(UCS_STATUS_IS_ERR(status))) {                 \
                     step->iter_ep = ep_iter - phase->multi_eps;                \
@@ -507,6 +533,7 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
                 ucg_builtin_comp_last_step_cb(req, UCS_OK);                    \
                 return UCS_OK;                                                 \
             } else {                                                           \
+                step->am_header = header;                                      \
                 return ucg_builtin_comp_step_cb(req);                          \
             }                                                                  \
         }                                                                      \
@@ -554,14 +581,15 @@ ucg_builtin_step_am_zcopy_max(ucg_builtin_request_t *req,
  * @ref ucg_builtin_comp_step_cb() . This call will choose the second branch,
  * the swith-case, which will send the message and
  */
-UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_step_execute, (req),
-                 ucg_builtin_request_t *req)
+UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_step_execute, (req, header),
+                 ucg_builtin_request_t *req, ucg_builtin_header_t header)
 {
     int is_zcopy;
     ucs_status_t status;
     size_t item_interval;
     unsigned frags_per_ep;
 
+    uint8_t am_id                   = req->am_id;
     ucg_builtin_op_step_t *step     = req->step;
     ucg_builtin_plan_phase_t *phase = step->phase;
     ucg_builtin_comp_slot_t *slot   = ucs_container_of(req, ucg_builtin_comp_slot_t, req);
@@ -616,9 +644,7 @@ UCS_PROFILE_FUNC(ucs_status_t, ucg_builtin_step_execute, (req),
     }
 
     /* Initialize the users' request object, if applicable */
-    slot->req.expecting.local_id = step->am_header.msg.local_id;
-    ucs_assert(slot->req.expecting.local_id != 0);
-    return ucg_builtin_step_check_pending(slot);
+    return ucg_builtin_step_check_pending(slot, step, header);
 
     /************************** Error flows ***********************************/
 step_execute_error:

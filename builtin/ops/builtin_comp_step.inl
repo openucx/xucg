@@ -80,16 +80,18 @@ ucg_builtin_comp_step_cb(ucg_builtin_request_t *req)
 
     /* Start on the next step for this collective operation */
     ucg_builtin_op_step_t *prev_step  = req->step;
+    ucg_coll_id_t coll_id             = prev_step->am_header.msg.coll_id;
     ucg_builtin_op_step_t *next_step  = req->step = prev_step + 1;
-    next_step->am_header.msg.coll_id  = prev_step->am_header.msg.coll_id;
     req->pending                      = next_step->fragments_total;
+    ucg_builtin_header_t header       = next_step->am_header;
+    header.msg.coll_id                = coll_id;
 
     ucg_builtin_comp_ft_end_step(next_step - 1);
 
     ucs_assert(next_step->iter_offset == 0);
     ucs_assert(next_step->iter_ep == 0);
 
-    return ucg_builtin_step_execute(req);
+    return ucg_builtin_step_execute(req, header);
 }
 static void UCS_F_ALWAYS_INLINE
 ucg_builtin_mpi_reduce(void *mpi_op, void *src, void *dst,
@@ -135,6 +137,9 @@ ucg_builtin_comp_gather(uint8_t *recv_buffer, uint64_t offset, uint8_t *data,
     memcpy(recv_buffer, data, first_part);
     data += first_part;
     memcpy(recv_buffer + first_part + length, data, length - first_part);
+
+    // TODO: replace with SIMD like _mm256_i64gather_epi64 whenever possible
+    // TODO: for reduction - combine a reduce SIMD, e.g. _mm512_reduce_add_pd
 }
 
 static ucs_status_t UCS_F_ALWAYS_INLINE
@@ -379,7 +384,7 @@ ucg_builtin_step_recv_handle_comp(ucg_builtin_request_t *req, uint64_t offset,
         break;
 
     case UCG_BUILTIN_OP_STEP_COMP_SEND:
-        (void) ucg_builtin_step_execute(req);
+        (void) ucg_builtin_step_execute(req, step->am_header);
         break;
     }
 
@@ -396,13 +401,23 @@ ucg_builtin_step_recv_cb(ucg_builtin_request_t *req, uint64_t offset,
 }
 
 ucs_status_t static UCS_F_ALWAYS_INLINE
-ucg_builtin_step_check_pending(ucg_builtin_comp_slot_t *slot)
+ucg_builtin_step_check_pending(ucg_builtin_comp_slot_t *slot,
+                               ucg_builtin_op_step_t *step,
+                               ucg_builtin_header_t expected)
 {
     /* Check pending incoming messages - invoke the callback on each one */
     unsigned msg_index;
     ucp_recv_desc_t *rdesc;
     ucg_builtin_header_t *header;
-    uint16_t local_id = slot->req.expecting.local_id;
+    uint16_t local_id = expected.msg.local_id;
+
+    ucs_assert(local_id != 0);
+
+    if (ucs_ptr_array_is_empty(&slot->messages)) {
+        slot->req.expecting.local_id = local_id;
+        return UCS_INPROGRESS;
+    }
+
     ucs_ptr_array_for_each(rdesc, msg_index, &slot->messages) {
         header = (ucg_builtin_header_t*)(rdesc + 1);
         ucs_assert((header->msg.coll_id  != slot->req.expecting.coll_id) ||
@@ -415,6 +430,9 @@ ucg_builtin_step_check_pending(ucg_builtin_comp_slot_t *slot)
         if (ucs_likely(header->msg.local_id == local_id)) {
             /* Remove the packet (next call may lead here recursively) */
             ucs_ptr_array_remove(&slot->messages, msg_index);
+
+            /* we need this in place in case we skip to the next step */
+            slot->req.expecting.local_id = local_id;
 
             /* Handle this "waiting" packet, possibly completing the step */
             int is_step_done = ucg_builtin_step_recv_cb(&slot->req,
@@ -437,6 +455,8 @@ ucg_builtin_step_check_pending(ucg_builtin_comp_slot_t *slot)
             }
         }
     }
+
+    slot->req.expecting.local_id = local_id;
 
     return UCS_INPROGRESS;
 }

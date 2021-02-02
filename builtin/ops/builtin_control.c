@@ -301,8 +301,9 @@ static ucs_status_t ucg_builtin_optimize_am_bcopy_to_zcopy(ucg_builtin_op_t *op)
                 goto bcopy_to_zcopy_cleanup;
             }
 
-            step->flags &= ~UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_BCOPY;
-            step->flags |=  UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_ZCOPY;
+            step->flags   &= ~UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_BCOPY;
+            step->flags   |=  UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_ZCOPY;
+            step->uct_send = step->uct_iface->ops.ep_am_zcopy;
 
             if (step->comp_criteria ==
                     UCG_BUILTIN_OP_STEP_COMP_CRITERIA_MULTIPLE_MESSAGES) {
@@ -435,6 +436,7 @@ ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
         if (ucs_likely(length <= max_short)) {
             /* Short send - single message */
             *send_flag            = UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_SHORT;
+            step->uct_send        = step->uct_iface->ops.ep_am_short;
             step->fragments_total = phase->ep_cnt;
             return UCS_OK;
         }
@@ -456,6 +458,7 @@ ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
                                     (UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_SHORT |
                                      UCG_BUILTIN_OP_STEP_FLAG_FRAGMENTED);
 
+            step->uct_send        = step->uct_iface->ops.ep_am_short;
             step->fragment_length = max_short - (max_short % dt_len);
             step->fragments_total = phase->ep_cnt *
                                     (length / step->fragment_length +
@@ -475,12 +478,14 @@ ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
             if (ucs_likely(length <= max_zcopy)) {
                 /* ZCopy send - single message */
                 *send_flag            = UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_ZCOPY;
+                step->uct_send        = step->uct_iface->ops.ep_am_zcopy;
                 step->fragments_total = phase->ep_cnt;
             } else {
                 /* ZCopy send - single message */
                 *send_flag            = (enum ucg_builtin_op_step_flags)
                                         (UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_ZCOPY |
                                          UCG_BUILTIN_OP_STEP_FLAG_FRAGMENTED);
+                step->uct_send        = step->uct_iface->ops.ep_am_zcopy;
                 step->fragment_length = max_zcopy - (max_zcopy % dt_len);
                 step->fragments_total = phase->ep_cnt *
                                         (length / step->fragment_length +
@@ -503,6 +508,7 @@ ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
     if (ucs_likely(length <= max_bcopy)) {
         /* BCopy send - single message */
         *send_flag            = UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_BCOPY;
+        step->uct_send        = step->uct_iface->ops.ep_am_bcopy;
         step->fragment_length = step->buffer_length;
         step->fragments_total = phase->ep_cnt;
     } else {
@@ -510,6 +516,7 @@ ucg_builtin_step_send_flags(ucg_builtin_op_step_t *step,
         *send_flag            = (enum ucg_builtin_op_step_flags)
                                 (UCG_BUILTIN_OP_STEP_FLAG_SEND_AM_BCOPY |
                                  UCG_BUILTIN_OP_STEP_FLAG_FRAGMENTED);
+        step->uct_send        = step->uct_iface->ops.ep_am_bcopy;
         step->fragment_length = max_bcopy - (max_bcopy % dt_len);
         step->fragments_total = phase->ep_cnt *
                                 (length / step->fragment_length +
@@ -641,7 +648,6 @@ zcopy_redo:
 
     /* Set the parameters determining the send-flags later on */
     step->phase                   = phase;
-    step->am_id                   = plan->am_id;
     step->ep_cnt                  = phase->ep_cnt;
     step->batch_cnt               = phase->host_proc_cnt - 1;
     step->am_header.group_id      = plan->super.group_id;
@@ -654,11 +660,11 @@ zcopy_redo:
     step->recv_buffer             = (int8_t*)params->recv.buffer;
     step->uct_md                  = phase->md;
     step->flags                   = ucg_builtin_step_method_flags[phase->method];
-
-    if (phase->md) {
-        step->uct_iface = (phase->ep_cnt == 1) ? phase->single_ep->iface :
-                                                 phase->multi_eps[0]->iface;
-    } /* Note: we assume all the UCT endpoints have the same interface */
+    step->uct_iface               = (phase->ep_cnt == 1) ?
+                                    phase->single_ep->iface :
+                                    phase->multi_eps[0]->iface;
+    step->uct_progress            = step->uct_iface->ops.iface_progress;
+    /* Note: we assume all the UCT endpoints have the same interface */
 
     /* If the previous step involved receiving - plan accordingly  */
     if (*flags & UCG_BUILTIN_STEP_RECV_FLAGS) {
@@ -1293,6 +1299,9 @@ void ucg_builtin_op_discard(ucg_op_t *op)
     ucs_mpool_put_inline(op);
 }
 
+#define UCG_BUILTIN_OP_GET_SLOT_PTR(_gctx, _slot_id) \
+    UCS_PTR_BYTE_OFFSET(_gctx, _slot_id * sizeof(ucg_builtin_comp_slot_t))
+
 ucs_status_t ucg_builtin_op_trigger(ucg_op_t *op,
                                     ucg_coll_id_t coll_id,
                                     void *request)
@@ -1300,8 +1309,8 @@ ucs_status_t ucg_builtin_op_trigger(ucg_op_t *op,
     /* Allocate a "slot" for this operation, from a per-group array of slots */
     ucg_builtin_op_t *builtin_op  = (ucg_builtin_op_t*)op;
     unsigned slot_idx             = coll_id % UCG_BUILTIN_MAX_CONCURRENT_OPS;
-    ucg_builtin_comp_slot_t *slot = (ucg_builtin_comp_slot_t*)builtin_op->gctx +
-                                    slot_idx;
+    ucg_builtin_group_ctx_t *gctx = builtin_op->gctx;
+    ucg_builtin_comp_slot_t *slot = UCG_BUILTIN_OP_GET_SLOT_PTR(gctx, slot_idx);
 
     if (ucs_unlikely(slot->req.expecting.local_id != 0)) {
         ucs_error("UCG Builtin planner exceeded its concurrent collectives limit.");
@@ -1314,8 +1323,8 @@ ucs_status_t ucg_builtin_op_trigger(ucg_op_t *op,
     ucg_builtin_op_step_t *first_step  = builtin_op->steps;
     builtin_req->step                  = first_step;
     builtin_req->pending               = first_step->fragments_total;
+    ucg_builtin_header_t header        = first_step->am_header;
     builtin_req->comp_req              = request;
-    first_step->am_header.msg.coll_id  = coll_id;
     builtin_op->current                = &builtin_req->step;
 
     /* Sanity checks */
@@ -1334,5 +1343,6 @@ ucs_status_t ucg_builtin_op_trigger(ucg_op_t *op,
     }
 
     /* Start the first step, which may actually complete the entire operation */
-    return ucg_builtin_step_execute(builtin_req);
+    header.msg.coll_id = coll_id;
+    return ucg_builtin_step_execute(builtin_req, header);
 }
