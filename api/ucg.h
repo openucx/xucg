@@ -356,7 +356,9 @@ typedef struct ucg_collective {
              * Note: if UCG_PARAM_FIELD_DATATYPE_CB is not passed during UCG
              *       initialization, UCG will assume that dtype is already a
              *       UCP datatype (will perform static cast to ucp_datatpe_t)
-             *       and dtypes points to an array of such UCP datatpes.
+             *       and dtypes points to an array of such UCP datatypes.
+             *       Also, setting dtype to NULL will be translated to a single
+             *       byte (regardless of UCG_PARAM_FIELD_DATATYPE_CB).
              */
         };
     } send, recv;

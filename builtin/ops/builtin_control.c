@@ -608,7 +608,11 @@ ucg_builtin_step_select_packers(const ucg_collective_params_t *params,
 static inline int ucg_builtin_convert_datatype(void *param_datatype,
                                                ucp_datatype_t *ucp_datatype)
 {
-    if (ucg_global_params.field_mask & UCG_PARAM_FIELD_DATATYPE_CB) {
+    if (ucs_unlikely(param_datatype == NULL)) {
+        return ucp_dt_make_contig(1);
+    }
+
+    if (ucs_likely(ucg_global_params.field_mask & UCG_PARAM_FIELD_DATATYPE_CB)) {
         int ret = ucg_global_params.datatype.convert(param_datatype, ucp_datatype);
         if (ucs_unlikely(ret != 0)) {
             ucs_error("Datatype conversion callback failed");

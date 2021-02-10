@@ -7,11 +7,13 @@
 #include "ucg_group.h"
 #include "ucg_context.h"
 
-#include <ucp/core/ucp_worker.h>
 #include <ucs/datastruct/queue.h>
 #include <ucs/datastruct/list.h>
 #include <ucs/profile/profile.h>
 #include <ucs/debug/memtrack.h>
+#include <ucp/core/ucp_worker.h>
+#include <ucp/wireup/address.h>
+#include <ucg/api/ucg_mpi.h>
 
 
 #define UCG_GROUP_PARAM_REQUIRED_MASK (UCG_GROUP_PARAM_FIELD_MEMBER_COUNT |\
@@ -101,6 +103,163 @@ static inline ucs_status_t ucg_group_plan(ucg_group_h group,
     return UCS_OK;
 }
 
+static ucs_status_t
+ucg_group_wireup_coll_iface_calc(enum ucg_group_member_distance *distance,
+                                 ucg_group_member_index_t member_count,
+                                 uint32_t *proc_idx, uint32_t *proc_cnt)
+{
+    ucs_status_t status = UCS_ERR_INVALID_PARAM;
+    ucg_group_member_index_t idx, cnt = 0;
+
+    for (idx = 0; idx < member_count; idx++) {
+        if (distance[idx] == UCG_GROUP_MEMBER_DISTANCE_SELF) {
+            *proc_idx = (uint32_t)idx;
+            status    = UCS_OK;
+        } else if (distance[idx] <= UCG_GROUP_MEMBER_DISTANCE_HOST) {
+            (*proc_cnt)++;
+        }
+    }
+
+    *proc_cnt = (uint32_t)cnt;
+
+    return status;
+}
+
+static ucs_status_t ucg_group_wireup_coll_iface_create(ucg_group_h group,
+                                                       int is_bcast)
+{
+    ucs_status_t status;
+
+    ucp_rsc_index_t tl_id = is_bcast ? group->context->bcast_id :
+                                       group->context->incast_id;
+
+    ucp_worker_iface_t **wiface = is_bcast ? &group->bcast_iface :
+                                             &group->incast_iface;
+
+    uct_iface_params_t iface_params = {
+            .field_mask           = UCT_IFACE_PARAM_FIELD_OPEN_MODE |
+                                    UCT_IFACE_PARAM_FIELD_DEVICE |
+                                    UCT_IFACE_PARAM_FIELD_COLL_INFO,
+
+            .open_mode            = UCT_IFACE_OPEN_MODE_DEVICE,
+
+            .mode = {
+                .device = {
+                        .tl_name  = NULL, // TODO: resource->tl_rsc.tl_name,
+                        .dev_name = NULL  // TODO: resource->tl_rsc.dev_name
+                }
+            },
+
+            .global_info = {
+                    .proc_cnt = group->params.member_count,
+                    .proc_idx = group->params.member_index
+            }
+    };
+
+    // TODO: the interface will contain all the members - should be optimized...
+
+    ucs_assert(group->params.field_mask & UCG_GROUP_PARAM_FIELD_DISTANCES);
+    status = ucg_group_wireup_coll_iface_calc(group->params.distance,
+                                              group->params.member_count,
+                                              &iface_params.host_info.proc_cnt,
+                                              &iface_params.host_info.proc_cnt);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    status = ucp_worker_iface_open(group->worker, tl_id, &iface_params, wiface);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    return ucp_worker_iface_init(group->worker, tl_id, *wiface);
+}
+
+static ucs_status_t ucg_group_wireup_coll_iface_bcast_addresses(ucg_group_h group,
+                                                                void *addrs,
+                                                                size_t addr_len)
+{
+    int is_done;
+    ucg_coll_h first_bcast;
+
+    ucs_status_t status = ucg_coll_bcast_init(addrs, addrs, addr_len, NULL,
+                                              NULL, 0, 0, group, &first_bcast);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    status = ucg_collective_start(first_bcast, &is_done);
+
+    while (!is_done) {
+        ucp_worker_progress(group->worker);
+    }
+
+    ucg_collective_destroy(first_bcast);
+
+    return status;
+}
+
+static ucs_status_t ucg_group_wireup_coll_ifaces(ucg_group_h group)
+{
+    void *addrs;
+    size_t addr_len;
+    ucs_status_t status;
+    ucp_unpacked_address_t unpacked;
+
+    ucp_worker_h worker = group->worker;
+    uint64_t tl_bitmap  = group->context->bcast_id |
+                          group->context->incast_id;
+    unsigned pack_flags = UCP_ADDRESS_PACK_FLAG_DEVICE_ADDR |
+                          UCP_ADDRESS_PACK_FLAG_IFACE_ADDR;
+    unsigned init_flags = UCP_EP_INIT_CREATE_AM_LANE;
+
+    /* Create a broadcast interface for the new communicator */
+    status = ucg_group_wireup_coll_iface_create(group, 1);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    /* Create an incast interface for the new communicator */
+    status = ucg_group_wireup_coll_iface_create(group, 0);
+    if (status != UCS_OK) {
+        // TODO: cleanup
+        return status;
+    }
+
+    /* Root prepares the address (the rest will be overwritten...) */
+    status = ucp_address_pack(worker, NULL, tl_bitmap, pack_flags,
+                              NULL, &addr_len, &addrs);
+    if (status != UCS_OK) {
+        // TODO: cleanup
+        return status;
+    }
+
+    /* Broadcast the address */
+    status = ucg_group_wireup_coll_iface_bcast_addresses(group, addrs, addr_len);
+    if (status != UCS_OK) {
+        // TODO: cleanup
+        return status;
+    }
+
+    status = ucp_address_unpack(worker, addrs, pack_flags, &unpacked);
+    if (status != UCS_OK) {
+        // TODO: cleanup
+        return status;
+    }
+
+    /* Connect to the address (for root - loopback) */
+    ucp_ep_create_to_worker_addr(worker, tl_bitmap, &unpacked, init_flags,
+                                 "for incast/bcast", &group->root_ep);
+    if (status != UCS_OK) {
+        // TODO: cleanup
+        return status;
+    }
+
+    ucs_free(addrs);
+
+    return UCS_OK;
+}
+
 ucs_status_t ucg_group_create(ucp_worker_h worker,
                               const ucg_group_params_t *params,
                               ucg_group_h *group_p)
@@ -148,19 +307,17 @@ ucs_status_t ucg_group_create(ucp_worker_h worker,
         group->params.field_mask |= UCG_GROUP_PARAM_FIELD_ID;
     }
 
-    /* Initialize the planners (loadable modules) */
-    status = ucg_plan_group_create(group);
-    if (status != UCS_OK) {
-        goto cleanup_group;
-    }
-
-    // TODO: status = ucg_group_wireup_coll_ifaces(group); // based on my index
-
     status = UCS_STATS_NODE_ALLOC(&group->stats,
                                   &ucg_group_stats_class,
                                   worker->stats, "-%p", group);
     if (status != UCS_OK) {
         goto cleanup_group;
+    }
+
+    /* Initialize the planners (loadable modules) */
+    status = ucg_plan_group_create(group);
+    if (status != UCS_OK) {
+        goto cleanup_stats;
     }
 
     /* Clear the cache */
@@ -169,9 +326,19 @@ ucs_status_t ucg_group_create(ucp_worker_h worker,
 
     ucs_list_add_head(&ctx->groups_head, &group->list);
 
+    if (group->params.member_count >= ctx->config.coll_iface_member_thresh) {
+        status = ucg_group_wireup_coll_ifaces(group);
+        if (status != UCS_OK) {
+            ucg_group_destroy(group);
+            return status;
+        }
+    }
+
     *group_p = group;
     return UCS_OK;
 
+cleanup_stats:
+    UCS_STATS_NODE_FREE(group->stats);
 cleanup_group:
     ucs_free(group);
     return status;

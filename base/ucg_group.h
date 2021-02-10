@@ -9,6 +9,7 @@
 #include <ucs/stats/stats.h>
 #include <ucs/type/spinlock.h>
 #include <ucs/datastruct/khash.h>
+#include <ucp/core/ucp_types.h>
 
 /* Note: <ucs/api/...> not used because this header is not installed */
 #include "../api/ucg_plan_component.h"
@@ -39,6 +40,9 @@ typedef struct ucg_group {
     ucs_list_link_t       list;         /**< worker's group list */
     ucg_plan_resources_t *resources;    /**< resources available to this group */
     khash_t(ucg_group_ep) eps;          /**< endpoints created for this group */
+    ucp_worker_iface_t   *bcast_iface;  /**< broadcast interface on this group */
+    ucp_worker_iface_t   *incast_iface; /**< incast interface on this group */
+    ucp_ep_h              root_ep;
 
     UCS_STATS_NODE_DECLARE(stats);
 

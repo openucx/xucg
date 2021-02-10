@@ -26,6 +26,10 @@ ucs_config_field_t ucg_config_table[] = {
    "How many operations can be stored in the per-group cache.\n",
    ucs_offsetof(ucg_context_config_t, group_cache_size_thresh), UCS_CONFIG_TYPE_UINT},
 
+  {"COLL_IFACE_MEMBER_THRESH", "3",
+   "How many members warrant the use of collective transports.\n",
+   ucs_offsetof(ucg_context_config_t, coll_iface_member_thresh), UCS_CONFIG_TYPE_UINT},
+
   {NULL}
 };
 

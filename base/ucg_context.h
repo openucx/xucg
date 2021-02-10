@@ -19,6 +19,9 @@ typedef struct ucg_config {
     /** Up to how many operations should be cached in each group */
     unsigned group_cache_size_thresh;
 
+    /** Above how many group members should UCG initiate collective transports */
+    unsigned coll_iface_member_thresh;
+
     /** Used for passing UCP configuration (not set by @ref ucg_read_config ) */
     ucp_config_t *ucp_config;
 } ucg_context_config_t;
@@ -38,6 +41,8 @@ typedef struct ucg_context {
     size_t                per_group_planners_ctx;
     ucs_list_link_t       groups_head;
     ucg_group_id_t        next_group_id;
+    ucp_rsc_index_t       bcast_id;
+    ucp_rsc_index_t       incast_id;
 
     struct {
         int (*lookup_f)(void *cb_group_context,
